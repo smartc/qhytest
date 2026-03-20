@@ -118,6 +118,10 @@ User=$SERVICE_USER
 Group=plugdev
 WorkingDirectory=$SCRIPT_DIR
 
+# Allow binding to privileged ports (< 1024) without running as root
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
 # Flask app; adjust --port if needed
 ExecStart=$VENV_PYTHON $SCRIPT_DIR/qhy_web.py --port $PORT
 
