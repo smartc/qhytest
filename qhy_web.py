@@ -694,6 +694,23 @@ HTML = r"""<!DOCTYPE html>
     font-size: 10px; color: #555; margin: 8px 0 2px;
     display: flex; justify-content: space-between;
   }
+  /* Seeing panel */
+  #seeing-panel { margin-top: 8px; }
+  .seeing-primary {
+    font-size: 18px; font-weight: bold; color: #7eb8f7;
+    text-align: center; margin: 4px 0;
+  }
+  .seeing-primary .seeing-unit { font-size: 11px; color: #666; font-weight: normal; }
+  .seeing-quality {
+    text-align: center; font-size: 10px; padding: 2px 6px;
+    border-radius: 3px; margin-bottom: 6px; display: inline-block;
+    width: 100%; box-sizing: border-box;
+  }
+  .seeing-quality.ok { background: #0a2a0a; color: #4a4; border: 1px solid #2a4a2a; }
+  .seeing-quality.warn { background: #2a2a0a; color: #aa4; border: 1px solid #4a4a2a; }
+  .seeing-quality.bad  { background: #2a0a0a; color: #a44; border: 1px solid #4a2a2a; }
+  .seeing-detail { font-size: 11px; color: #888; margin: 2px 0; }
+  .seeing-detail span { color: #ccc; }
 </style>
 </head>
 <body>
@@ -837,6 +854,24 @@ HTML = r"""<!DOCTYPE html>
         <canvas class="star-chart" id="trend-canvas" height="44"></canvas>
 
         <button id="btn-clear-star">Clear Selection</button>
+
+        <div id="seeing-panel" style="display:none">
+          <hr class="divider" style="margin:8px 0;">
+          <div class="ctrl-label">Seeing Estimate</div>
+          <div class="seeing-primary">
+            <span id="seeing-val">--</span>
+            <span class="seeing-unit">arcsec</span>
+          </div>
+          <div class="seeing-quality ok" id="seeing-quality">--</div>
+          <div class="seeing-detail">r<sub>0</sub>: <span id="seeing-r0">--</span> mm</div>
+          <div class="seeing-detail">FWHM median: <span id="seeing-fwhm-med">--</span>"</div>
+          <div class="seeing-detail">Method: <span id="seeing-method">--</span></div>
+          <div class="seeing-detail">Frames: <span id="seeing-frames">--</span> (valid: <span id="seeing-valid">--</span>)</div>
+          <div class="trend-label">
+            <span>Seeing History</span><span id="seeing-range">--</span>
+          </div>
+          <canvas class="star-chart" id="seeing-canvas" height="54"></canvas>
+        </div>
       </div>
     </div>
 
@@ -1433,6 +1468,7 @@ HTML = r"""<!DOCTYPE html>
     updateStarList();
     drawRoiOverlay();
     startProfilePolling();
+    startSeeingPolling();
   }
 
   document.getElementById('btn-clear-star').addEventListener('click', () => {
@@ -1444,6 +1480,7 @@ HTML = r"""<!DOCTYPE html>
     });
     document.getElementById('selected-star-panel').style.display = 'none';
     stopProfilePolling();
+    stopSeeingPolling();
     updateStarList();
     drawRoiOverlay();
   });
@@ -1663,6 +1700,66 @@ HTML = r"""<!DOCTYPE html>
       updateClearBtn();
       updateScaleHeader();
     });
+
+  // ---- Seeing polling ----
+  let seeingHistory = [];
+  let seeingTimer = null;
+  function startSeeingPolling() {
+    if (seeingTimer) return;
+    seeingTimer = setInterval(pollSeeing, 3000);
+  }
+  function stopSeeingPolling() {
+    if (seeingTimer) { clearInterval(seeingTimer); seeingTimer = null; }
+    seeingHistory = [];
+    document.getElementById('seeing-panel').style.display = 'none';
+  }
+  function pollSeeing() {
+    fetch('/api/seeing').then(r=>r.json()).then(d => {
+      if (d.status === 'no_data') return;
+      var panel = document.getElementById('seeing-panel');
+      panel.style.display = 'block';
+      document.getElementById('seeing-val').textContent =
+        d.seeing_arcsec !== null ? d.seeing_arcsec.toFixed(2) : '--';
+      document.getElementById('seeing-r0').textContent =
+        d.r0_m !== null ? (d.r0_m * 1000).toFixed(1) : '--';
+      document.getElementById('seeing-fwhm-med').textContent =
+        d.fwhm_median_arcsec !== null ? d.fwhm_median_arcsec.toFixed(1) : '--';
+      document.getElementById('seeing-method').textContent = d.method_used || '--';
+      document.getElementById('seeing-frames').textContent = d.frames_in_window || '--';
+      document.getElementById('seeing-valid').textContent =
+        d.valid_fraction !== null ? (d.valid_fraction * 100).toFixed(0) + '%' : '--';
+      var qEl = document.getElementById('seeing-quality');
+      qEl.textContent = d.quality || '--';
+      qEl.className = 'seeing-quality ' +
+        (d.quality === 'OK' ? 'ok' : (d.quality === 'HIGH_SCATTER' ? 'warn' : 'bad'));
+      // Fetch history for chart
+      fetch('/api/seeing/history').then(r=>r.json()).then(hist => {
+        seeingHistory = hist.map(e => e.seeing_arcsec).filter(v => v !== null);
+        drawSeeingTrend();
+      }).catch(()=>{});
+    }).catch(()=>{});
+  }
+  function drawSeeingTrend() {
+    var c = document.getElementById('seeing-canvas');
+    if (!c || seeingHistory.length < 2) return;
+    var ctx = c.getContext('2d');
+    var W = c.width, H = c.height;
+    ctx.clearRect(0,0,W,H);
+    var mn = Math.min.apply(null, seeingHistory);
+    var mx = Math.max.apply(null, seeingHistory);
+    if (mx - mn < 0.1) { mn -= 0.5; mx += 0.5; }
+    var pad = (mx - mn) * 0.1; mn -= pad; mx += pad;
+    ctx.strokeStyle = '#7eb8f7'; ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (var i = 0; i < seeingHistory.length; i++) {
+      var x = i / (seeingHistory.length - 1) * (W - 4) + 2;
+      var y = H - 2 - (seeingHistory[i] - mn) / (mx - mn) * (H - 4);
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+    document.getElementById('seeing-range').textContent =
+      mn.toFixed(1) + '-' + mx.toFixed(1) + '"';
+  }
 })();
 </script>
 </body>
