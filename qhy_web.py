@@ -1026,6 +1026,7 @@ HTML = r"""<!DOCTYPE html>
     if (applySize !== camState.roi_size) setActiveRoiBtn(applySize);
     camState.roi_size = applySize;
     ghostRoi = null;  // entering sub-ROI mode, ghost no longer needed
+    clearStarDetections();  // stars from previous frame are invalid after ROI change
     sendRoi(applySize, pendingCenter.cx, pendingCenter.cy);
     cancelPending();
     updateClearBtn();
@@ -1039,6 +1040,16 @@ HTML = r"""<!DOCTYPE html>
 
   function updateClearBtn() {
     document.getElementById('btn-clear-roi').classList.toggle('visible', camState.roi_size > 0);
+  }
+
+  // Star detections are in ROI-frame coordinates; they must be cleared whenever
+  // the ROI frame actually changes so stale circles don't appear on the new view.
+  function clearStarDetections() {
+    detectedStars = [];
+    selectedStar  = null;
+    stopProfilePolling();
+    document.getElementById('selected-star-panel').style.display = 'none';
+    updateStarList();
   }
 
   function sendRoi(size, cx, cy) {
@@ -1059,6 +1070,7 @@ HTML = r"""<!DOCTYPE html>
         }
         sendRoi(0, camState.roi_cx, camState.roi_cy);
         camState.roi_size = 0;
+        clearStarDetections();
         cancelPending();  // clears pending, redraws ghost
         setActiveRoiBtn(0);
         updateClearBtn();
@@ -1097,6 +1109,7 @@ HTML = r"""<!DOCTYPE html>
     }
     sendRoi(0, camState.roi_cx, camState.roi_cy);
     camState.roi_size = 0;
+    clearStarDetections();
     cancelPending();
     setActiveRoiBtn(0);
     updateClearBtn();
