@@ -30,6 +30,8 @@ except ImportError:
     print("Pillow not installed. Run: pip install pillow")
     raise SystemExit(1)
 
+import star_utils
+
 
 # ---------------------------------------------------------------------------
 # QHY SDK setup
@@ -111,6 +113,9 @@ class CameraWorker:
         self._auto_stretch = True
         self._histogram = None   # list of 256 counts
         self._hist_stats = None  # (min_adu, median_adu, max_adu)
+        self._latest_raw = None  # latest raw numpy array (for on-demand detection)
+        self._selected_star = None    # {'x': float, 'y': float} in ROI frame coords
+        self._star_measurement = None # latest measure_star() result
         self._thread = None
 
     def start(self):
@@ -137,6 +142,10 @@ class CameraWorker:
         with self._lock:
             if auto_stretch is not None:
                 self._auto_stretch = auto_stretch
+            # ROI change invalidates any selected star (coords are frame-relative)
+            if roi_size is not None or roi_cx is not None or roi_cy is not None:
+                self._selected_star = None
+                self._star_measurement = None
             needs_restart = (exposure_ms is not None or gain is not None
                              or roi_size is not None or roi_cx is not None
                              or roi_cy is not None)
@@ -158,8 +167,27 @@ class CameraWorker:
         with self._lock:
             return self._latest_jpeg
 
+    def get_raw_frame(self):
+        with self._lock:
+            return self._latest_raw
+
+    def set_selected_star(self, x, y):
+        with self._lock:
+            self._selected_star = {'x': float(x), 'y': float(y)}
+            self._star_measurement = None
+
+    def clear_selected_star(self):
+        with self._lock:
+            self._selected_star = None
+            self._star_measurement = None
+
+    def get_star_measurement(self):
+        with self._lock:
+            return dict(self._star_measurement) if self._star_measurement else None
+
     def get_stats(self):
         with self._lock:
+            meas = self._star_measurement
             return {
                 'fps': round(self._fps, 1),
                 'exposure_ms': self.exposure_ms,
@@ -171,6 +199,11 @@ class CameraWorker:
                 'sensor_w': self.SENSOR_W,
                 'sensor_h': self.SENSOR_H,
                 'error': self._error,
+                'star_selected':  self._selected_star is not None,
+                'star_fwhm':      meas['fwhm']            if meas else None,
+                'star_peak':      meas['peak']            if meas else None,
+                'star_snr':       meas['snr']             if meas else None,
+                'star_saturated': (meas['saturation_frac'] > 0.05) if meas else False,
             }
 
     def get_histogram(self):
@@ -312,8 +345,21 @@ class CameraWorker:
 
                     with self._lock:
                         self._latest_jpeg = jpeg
-                        self._histogram = hist.tolist()
-                        self._hist_stats = hist_stats
+                        self._latest_raw  = arr
+                        self._histogram   = hist.tolist()
+                        self._hist_stats  = hist_stats
+                        selected = self._selected_star
+
+                    # Measure selected star on every captured frame
+                    if selected is not None:
+                        try:
+                            meas = star_utils.measure_star(
+                                arr, selected['x'], selected['y'])
+                            if meas is not None:
+                                with self._lock:
+                                    self._star_measurement = meas
+                        except Exception:
+                            pass
 
                     fps_frames += 1
                     now = time.time()
@@ -518,6 +564,60 @@ HTML = r"""<!DOCTYPE html>
   }
   .btn-clear-roi.visible { display: block; }
   .btn-clear-roi:hover { background: #3a2020; border-color: #d46060; color: #e07070; }
+
+  /* ---- Star analysis panel ---- */
+  #btn-detect-stars {
+    width: 100%; padding: 6px; margin-top: 6px;
+    background: #162630; border: 1px solid #3a7a6a; color: #5dbea0;
+    border-radius: 3px; font-family: inherit; font-size: 12px; cursor: pointer;
+  }
+  #btn-detect-stars:hover { background: #1e3a40; }
+  #star-list {
+    margin-top: 6px; max-height: 110px; overflow-y: auto;
+    font-size: 11px;
+  }
+  .star-item {
+    display: flex; gap: 4px; align-items: center;
+    padding: 3px 4px; border-radius: 2px; cursor: pointer;
+    border: 1px solid transparent;
+  }
+  .star-item:hover  { background: #1a2a3a; border-color: #3a6a8a; }
+  .star-item.active { background: #1a3050; border-color: #7eb8f7; }
+  .star-idx  { color: #555; min-width: 16px; }
+  .star-pos  { color: #888; flex: 1; }
+  .star-fwhm { color: #7eb8f7; min-width: 36px; }
+  .star-snr  { color: #aaa; }
+  #selected-star-panel { margin-top: 8px; }
+  .ss-row {
+    display: flex; align-items: baseline; gap: 4px;
+    margin-bottom: 4px; font-size: 12px;
+  }
+  .ss-label { color: #666; min-width: 44px; }
+  .ss-val   { color: #e0e0e0; font-weight: bold; }
+  .ss-unit  { color: #555; font-size: 10px; }
+  .sat-warn {
+    display: none; font-size: 10px; padding: 1px 4px;
+    background: #5c1010; border: 1px solid #c03030;
+    color: #e05050; border-radius: 2px; margin-left: 4px;
+  }
+  .chart-label {
+    font-size: 10px; color: #555; margin: 6px 0 2px;
+  }
+  .star-chart {
+    display: block; background: #0a0a0a;
+    border: 1px solid #222; border-radius: 2px;
+    width: 196px;
+  }
+  #btn-clear-star {
+    width: 100%; margin-top: 8px; padding: 5px;
+    background: #1e1e1e; border: 1px solid #444; color: #888;
+    border-radius: 3px; font-family: inherit; font-size: 11px; cursor: pointer;
+  }
+  #btn-clear-star:hover { border-color: #aaa; color: #ccc; }
+  .trend-label {
+    font-size: 10px; color: #555; margin: 8px 0 2px;
+    display: flex; justify-content: space-between;
+  }
 </style>
 </head>
 <body>
@@ -599,6 +699,43 @@ HTML = r"""<!DOCTYPE html>
         </div>
       </div>
       <button class="btn-clear-roi" id="btn-clear-roi">✕ Clear ROI</button>
+    </div>
+
+    <div class="ctrl-group">
+      <div class="ctrl-label">Star Analysis</div>
+      <button id="btn-detect-stars">Detect Stars</button>
+      <div id="star-list"></div>
+
+      <div id="selected-star-panel" style="display:none">
+        <div class="ss-row">
+          <span class="ss-label">FWHM</span>
+          <span class="ss-val" id="ss-fwhm">--</span>
+          <span class="ss-unit">px</span>
+        </div>
+        <div class="ss-row">
+          <span class="ss-label">Peak</span>
+          <span class="ss-val" id="ss-peak">--</span>
+          <span class="ss-unit">/ 255</span>
+          <span class="sat-warn" id="ss-sat">SAT</span>
+        </div>
+        <div class="ss-row">
+          <span class="ss-label">SNR</span>
+          <span class="ss-val" id="ss-snr">--</span>
+        </div>
+
+        <div class="chart-label">Radial Profile</div>
+        <canvas class="star-chart" id="profile-canvas" height="72"></canvas>
+
+        <div class="chart-label">Pixel Histogram</div>
+        <canvas class="star-chart" id="hist-canvas" height="54"></canvas>
+
+        <div class="trend-label">
+          <span>FWHM History</span><span id="trend-range">--</span>
+        </div>
+        <canvas class="star-chart" id="trend-canvas" height="44"></canvas>
+
+        <button id="btn-clear-star">Clear Selection</button>
+      </div>
     </div>
 
     <hr class="divider">
@@ -696,6 +833,7 @@ HTML = r"""<!DOCTYPE html>
         if (d.sensor_h  !== undefined) camState.sensor_h  = d.sensor_h;
         if (d.roi_size  > 0)           lastSubRoiSize      = d.roi_size;
         updateClearBtn();
+        updateStarStats(d);
         drawRoiOverlay();
       })
       .catch(() => {});
@@ -781,6 +919,15 @@ HTML = r"""<!DOCTYPE html>
     return { offX, offY, renderW, renderH, curRoi };
   }
 
+  // ROI frame pixel → canvas pixel
+  function roiToCanvas(rx, ry) {
+    const { offX, offY, renderW, renderH, curRoi } = getImgRenderInfo();
+    return {
+      x: offX + (rx / curRoi.w) * renderW,
+      y: offY + (ry / curRoi.h) * renderH,
+    };
+  }
+
   // Canvas pixel → sensor coordinate (null if outside the image).
   function canvasToSensor(cx, cy) {
     const { offX, offY, renderW, renderH, curRoi } = getImgRenderInfo();
@@ -795,6 +942,8 @@ HTML = r"""<!DOCTYPE html>
 
   function drawRoiOverlay() {
     roiCtx.clearRect(0, 0, roiCanvas.width, roiCanvas.height);
+
+    drawStarsOnCanvas();   // stars always drawn first (background layer)
 
     if (pendingCenter) {
       const { offX, offY, renderW, renderH, curRoi } = getImgRenderInfo();
@@ -954,14 +1103,318 @@ HTML = r"""<!DOCTYPE html>
   });
   document.addEventListener('keydown', e => { if (e.key === 'Escape') cancelPending(); });
 
-  // ---- canvas click ----
+  // ---- canvas click — star selection takes priority ----
 
   roiCanvas.addEventListener('click', e => {
-    const rect = roiCanvas.getBoundingClientRect();
-    const sensor = canvasToSensor(e.clientX - rect.left, e.clientY - rect.top);
+    const rect  = roiCanvas.getBoundingClientRect();
+    const canvX = e.clientX - rect.left;
+    const canvY = e.clientY - rect.top;
+
+    // Check proximity to any detected star (canvas-pixel hit radius)
+    const HIT = 18;
+    for (const star of detectedStars) {
+      const sc = roiToCanvas(star.x, star.y);
+      if (Math.hypot(canvX - sc.x, canvY - sc.y) <= HIT) {
+        selectStar(star);
+        return;
+      }
+    }
+
+    // Otherwise: ROI-center click
+    const sensor = canvasToSensor(canvX, canvY);
     if (!sensor) return;
     setPendingCenter(sensor.cx, sensor.cy);
   });
+
+  // =========================================================
+  // Star Analysis
+  // =========================================================
+
+  let detectedStars = [];
+  let selectedStar  = null;
+  let fwhmHistory   = [];   // last 60 measurements for the trend strip
+
+  // ---- draw star circles on the canvas overlay ----
+  function drawStarsOnCanvas() {
+    if (detectedStars.length === 0 && selectedStar === null) return;
+    const { renderW, curRoi } = getImgRenderInfo();
+    const scale = renderW / curRoi.w;  // canvas-px per ROI-px
+
+    roiCtx.save();
+    for (const star of detectedStars) {
+      const isSelected = selectedStar &&
+                         star.x === selectedStar.x && star.y === selectedStar.y;
+      const c  = roiToCanvas(star.x, star.y);
+      const cr = Math.max(4, (star.fwhm / 2) * scale);  // circle radius = FWHM/2
+
+      roiCtx.beginPath();
+      roiCtx.arc(c.x, c.y, cr, 0, 2 * Math.PI);
+
+      if (isSelected) {
+        roiCtx.strokeStyle = '#ffe066';
+        roiCtx.lineWidth   = 2;
+        roiCtx.stroke();
+        // second outer ring
+        roiCtx.beginPath();
+        roiCtx.arc(c.x, c.y, cr + 4, 0, 2 * Math.PI);
+        roiCtx.strokeStyle = 'rgba(255,224,102,0.35)';
+        roiCtx.lineWidth   = 1;
+        roiCtx.stroke();
+      } else {
+        roiCtx.strokeStyle = 'rgba(94,190,160,0.8)';
+        roiCtx.lineWidth   = 1;
+        roiCtx.stroke();
+      }
+    }
+    roiCtx.restore();
+  }
+
+  // ---- sidebar star list ----
+  function updateStarList() {
+    const list = document.getElementById('star-list');
+    if (detectedStars.length === 0) {
+      list.innerHTML = '<div style="font-size:11px;color:#555;margin-top:4px">No stars found</div>';
+      return;
+    }
+    list.innerHTML = detectedStars.slice(0, 10).map((s, i) => {
+      const active = selectedStar && s.x === selectedStar.x && s.y === selectedStar.y
+                     ? ' active' : '';
+      return `<div class="star-item${active}" data-idx="${i}">
+        <span class="star-idx">${i + 1}</span>
+        <span class="star-pos">${Math.round(s.x)},${Math.round(s.y)}</span>
+        <span class="star-fwhm">${s.fwhm.toFixed(1)}px</span>
+        <span class="star-snr">SNR${Math.round(s.snr)}</span>
+      </div>`;
+    }).join('');
+    list.querySelectorAll('.star-item').forEach(el => {
+      el.addEventListener('click', () => {
+        selectStar(detectedStars[parseInt(el.dataset.idx)]);
+      });
+    });
+  }
+
+  // ---- detect ----
+  document.getElementById('btn-detect-stars').addEventListener('click', () => {
+    fetch('/api/stars')
+      .then(r => r.json())
+      .then(d => {
+        detectedStars = d.stars || [];
+        updateStarList();
+        drawRoiOverlay();
+      });
+  });
+
+  // ---- select / clear ----
+  function selectStar(star) {
+    selectedStar = star;
+    fetch('/api/stars/select', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ x: star.x, y: star.y }),
+    });
+    document.getElementById('selected-star-panel').style.display = 'block';
+    updateStarList();
+    drawRoiOverlay();
+    startProfilePolling();
+  }
+
+  document.getElementById('btn-clear-star').addEventListener('click', () => {
+    selectedStar = null;
+    fetch('/api/stars/select', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ clear: true }),
+    });
+    document.getElementById('selected-star-panel').style.display = 'none';
+    stopProfilePolling();
+    updateStarList();
+    drawRoiOverlay();
+  });
+
+  // ---- live stats from pollStats ----
+  function updateStarStats(d) {
+    if (!d.star_selected) return;
+    if (d.star_fwhm !== null && d.star_fwhm !== undefined) {
+      document.getElementById('ss-fwhm').textContent = d.star_fwhm.toFixed(1);
+      document.getElementById('ss-peak').textContent = d.star_peak;
+      document.getElementById('ss-snr').textContent  = d.star_snr !== null
+                                                        ? d.star_snr.toFixed(1) : '--';
+      document.getElementById('ss-sat').style.display = d.star_saturated ? 'inline' : 'none';
+      fwhmHistory.push(d.star_fwhm);
+      if (fwhmHistory.length > 60) fwhmHistory.shift();
+      drawTrend();
+    }
+  }
+
+  // ---- profile polling ----
+  let profileTimer = null;
+  function startProfilePolling() {
+    if (profileTimer) return;
+    fetchProfile();
+    profileTimer = setInterval(fetchProfile, 2500);
+  }
+  function stopProfilePolling() {
+    if (profileTimer) { clearInterval(profileTimer); profileTimer = null; }
+    fwhmHistory = [];
+  }
+
+  function fetchProfile() {
+    fetch('/api/stars/profile')
+      .then(r => r.json())
+      .then(d => {
+        if (d.error) return;
+        drawRadialProfile(d.radial_profile, d.fwhm);
+        drawStarHistogram(d.histogram);
+      })
+      .catch(() => {});
+  }
+
+  // ---- Radial profile chart ----
+  function drawRadialProfile(profile, fwhm) {
+    const canvas = document.getElementById('profile-canvas');
+    const W = canvas.offsetWidth || 196;
+    canvas.width = W;
+    const H = canvas.height;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, W, H);
+
+    if (!profile || profile.length === 0) return;
+
+    const padL = 8, padR = 8, padT = 6, padB = 14;
+    const pw = W - padL - padR;
+    const ph = H - padT - padB;
+    const maxR = profile[profile.length - 1][0];
+
+    const toX = r  => padL + (r / maxR) * pw;
+    const toY = v  => padT + (1 - v) * ph;
+
+    // Filled area
+    ctx.beginPath();
+    ctx.moveTo(toX(0), toY(0));
+    profile.forEach(([r, v]) => ctx.lineTo(toX(r), toY(v)));
+    ctx.lineTo(toX(maxR), toY(0));
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(80,160,200,0.18)';
+    ctx.fill();
+
+    // Profile line
+    ctx.beginPath();
+    profile.forEach(([r, v], i) => i === 0 ? ctx.moveTo(toX(r), toY(v))
+                                            : ctx.lineTo(toX(r), toY(v)));
+    ctx.strokeStyle = '#5dbea0';
+    ctx.lineWidth   = 1.5;
+    ctx.stroke();
+
+    // Half-max line
+    ctx.beginPath();
+    ctx.moveTo(padL, toY(0.5));
+    ctx.lineTo(W - padR, toY(0.5));
+    ctx.strokeStyle = 'rgba(255,224,102,0.5)';
+    ctx.lineWidth   = 1;
+    ctx.setLineDash([3, 3]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // FWHM markers (±fwhm/2)
+    if (fwhm && fwhm < maxR * 2) {
+      const r_half = fwhm / 2;
+      ctx.strokeStyle = 'rgba(255,224,102,0.7)';
+      ctx.lineWidth   = 1;
+      [r_half].forEach(r => {
+        ctx.beginPath();
+        ctx.moveTo(toX(r), padT);
+        ctx.lineTo(toX(r), H - padB);
+        ctx.stroke();
+      });
+    }
+
+    // X-axis label
+    ctx.fillStyle = '#444';
+    ctx.font = '9px monospace';
+    ctx.fillText('0', padL - 3, H - 2);
+    ctx.fillText(`${maxR.toFixed(0)}px`, W - padR - 18, H - 2);
+  }
+
+  // ---- Pixel histogram chart ----
+  function drawStarHistogram(histogram) {
+    if (!histogram) return;
+    const canvas = document.getElementById('hist-canvas');
+    const W = canvas.offsetWidth || 196;
+    canvas.width = W;
+    const H = canvas.height;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, W, H);
+
+    const { bins, counts } = histogram;
+    if (!bins || bins.length === 0) return;
+
+    const padL = 8, padR = 4, padT = 4, padB = 12;
+    const pw = W - padL - padR;
+    const ph = H - padT - padB;
+    const maxC = Math.max(...counts, 1);
+    const bw   = pw / bins.length;
+    const SAT_THRESHOLD = 230;
+
+    bins.forEach((bin, i) => {
+      const barH = (counts[i] / maxC) * ph;
+      const x    = padL + i * bw;
+      const y    = padT + ph - barH;
+      ctx.fillStyle = bin >= SAT_THRESHOLD ? 'rgba(200,60,60,0.8)' : 'rgba(94,190,160,0.7)';
+      ctx.fillRect(x, y, Math.max(bw - 1, 1), barH);
+    });
+
+    // Saturation zone background tint
+    const satX = padL + (SAT_THRESHOLD / 256) * pw;
+    ctx.fillStyle = 'rgba(200,40,40,0.06)';
+    ctx.fillRect(satX, padT, W - padR - satX, ph);
+
+    // Axis labels
+    ctx.fillStyle = '#444';
+    ctx.font = '9px monospace';
+    ctx.fillText('0', padL - 3, H - 2);
+    ctx.fillText('255', W - padR - 18, H - 2);
+    ctx.fillStyle = 'rgba(200,60,60,0.6)';
+    ctx.fillText('SAT', satX + 2, padT + 9);
+  }
+
+  // ---- FWHM trend strip ----
+  function drawTrend() {
+    const canvas = document.getElementById('trend-canvas');
+    const W = canvas.offsetWidth || 196;
+    canvas.width = W;
+    const H = canvas.height;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, W, H);
+
+    if (fwhmHistory.length < 2) return;
+
+    const padL = 8, padR = 4, padT = 4, padB = 4;
+    const pw = W - padL - padR;
+    const ph = H - padT - padB;
+    const mn = Math.min(...fwhmHistory);
+    const mx = Math.max(...fwhmHistory);
+    const span = mx - mn || 1;
+
+    document.getElementById('trend-range').textContent =
+      `${mn.toFixed(1)}–${mx.toFixed(1)} px`;
+
+    const toX = i => padL + (i / (fwhmHistory.length - 1)) * pw;
+    const toY = v => padT + (1 - (v - mn) / span) * ph;
+
+    ctx.beginPath();
+    fwhmHistory.forEach((v, i) => i === 0 ? ctx.moveTo(toX(i), toY(v))
+                                           : ctx.lineTo(toX(i), toY(v)));
+    ctx.strokeStyle = '#7eb8f7';
+    ctx.lineWidth   = 1.5;
+    ctx.stroke();
+
+    // Latest point dot
+    const last = fwhmHistory.length - 1;
+    ctx.beginPath();
+    ctx.arc(toX(last), toY(fwhmHistory[last]), 2.5, 0, 2 * Math.PI);
+    ctx.fillStyle = '#7eb8f7';
+    ctx.fill();
+  }
 
   // ---- resize: keep canvas pixel dims in sync with layout dims ----
 
@@ -1029,6 +1482,35 @@ def stream():
 @app.route('/api/histogram')
 def histogram():
     return jsonify(camera.get_histogram())
+
+
+@app.route('/api/stars')
+def stars_detect():
+    """Detect stars in the current raw frame (on-demand)."""
+    frame = camera.get_raw_frame()
+    if frame is None:
+        return jsonify({'stars': [], 'error': 'no frame'})
+    detected = star_utils.detect_stars(frame)
+    return jsonify({'stars': detected, 'count': len(detected)})
+
+
+@app.route('/api/stars/select', methods=['POST'])
+def stars_select():
+    data = request.get_json(force=True)
+    if data.get('clear'):
+        camera.clear_selected_star()
+    else:
+        camera.set_selected_star(data['x'], data['y'])
+    return jsonify({'ok': True})
+
+
+@app.route('/api/stars/profile')
+def stars_profile():
+    """Return the latest full measurement for the selected star."""
+    meas = camera.get_star_measurement()
+    if meas is None:
+        return jsonify({'error': 'no star selected or no measurement yet'})
+    return jsonify(meas)
 
 
 @app.route('/api/params', methods=['GET', 'POST'])
