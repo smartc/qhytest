@@ -103,6 +103,8 @@ class CameraWorker:
         self._fps = 0.0
         self._error = None
         self._auto_stretch = True
+        self._histogram = None   # list of 256 counts
+        self._hist_stats = None  # (min_adu, median_adu, max_adu)
         self._thread = None
 
     def start(self):
@@ -135,6 +137,13 @@ class CameraWorker:
                 'gain': self.gain,
                 'auto_stretch': self._auto_stretch,
                 'error': self._error,
+            }
+
+    def get_histogram(self):
+        with self._lock:
+            return {
+                'histogram': self._histogram,
+                'stats': self._hist_stats,
             }
 
     def _encode_jpeg(self, arr, auto_stretch):
@@ -235,8 +244,18 @@ class CameraWorker:
 
                     jpeg = self._encode_jpeg(arr, auto_stretch)
 
+                    # Compute histogram on raw 8-bit pixel values
+                    hist, _ = np.histogram(arr, bins=256, range=(0, 255))
+                    hist_stats = (
+                        int(arr.min()),
+                        int(np.median(arr)),
+                        int(arr.max()),
+                    )
+
                     with self._lock:
                         self._latest_jpeg = jpeg
+                        self._histogram = hist.tolist()
+                        self._hist_stats = hist_stats
 
                     fps_frames += 1
                     now = time.time()
@@ -450,6 +469,19 @@ HTML = r"""<!DOCTYPE html>
 
     <hr class="divider">
 
+    <div class="ctrl-group">
+      <label>Histogram (ADU)</label>
+      <canvas id="hist-canvas" width="196" height="80"
+              style="width:100%;background:#0a0a0a;border:1px solid #2a2a2a;border-radius:2px;display:block;"></canvas>
+      <div style="margin-top:5px;font-size:11px;line-height:1.8;color:#888;">
+        Min: <span class="stat-val" id="h-min">--</span>
+        &nbsp;Med: <span class="stat-val" id="h-med">--</span>
+        &nbsp;Max: <span class="stat-val" id="h-max">--</span>
+      </div>
+    </div>
+
+    <hr class="divider">
+
     <div class="hint">
       <b>Focus tips:</b><br>
       • Start with short exposure (10–50 ms) and high gain<br>
@@ -528,6 +560,39 @@ HTML = r"""<!DOCTYPE html>
   setInterval(pollStats, 1000);
   pollStats();
 
+  // Histogram
+  const histCanvas = document.getElementById('hist-canvas');
+  const histCtx = histCanvas.getContext('2d');
+
+  function drawHistogram(data) {
+    const W = histCanvas.width, H = histCanvas.height;
+    histCtx.clearRect(0, 0, W, H);
+    const max = Math.max(...data);
+    if (max === 0) return;
+    const barW = W / data.length;
+    histCtx.fillStyle = '#4a90d9';
+    for (let i = 0; i < data.length; i++) {
+      const barH = (data[i] / max) * H;
+      histCtx.fillRect(i * barW, H - barH, barW, barH);
+    }
+  }
+
+  function pollHistogram() {
+    fetch('/api/histogram')
+      .then(r => r.json())
+      .then(d => {
+        if (d.histogram) drawHistogram(d.histogram);
+        if (d.stats) {
+          document.getElementById('h-min').textContent = d.stats[0];
+          document.getElementById('h-med').textContent = d.stats[1];
+          document.getElementById('h-max').textContent = d.stats[2];
+        }
+      })
+      .catch(() => {});
+  }
+  setInterval(pollHistogram, 500);
+  pollHistogram();
+
   // Load initial params from server
   fetch('/api/params')
     .then(r => r.json())
@@ -554,16 +619,28 @@ def index():
 def stream():
     def generate():
         last = None
+        target_interval = 0.1  # 10 fps
+        next_send = time.time()
         while True:
+            now = time.time()
+            wait = next_send - now
+            if wait > 0:
+                time.sleep(wait)
             frame = camera.get_jpeg()
             if frame is not None and frame is not last:
                 last = frame
                 yield (b'--frame\r\n'
                        b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+                next_send = time.time() + target_interval
             else:
                 time.sleep(0.02)
 
     return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+
+@app.route('/api/histogram')
+def histogram():
+    return jsonify(camera.get_histogram())
 
 
 @app.route('/api/params', methods=['GET', 'POST'])
