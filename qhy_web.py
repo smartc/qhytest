@@ -93,13 +93,19 @@ CONTROL_USBTRAFFIC = 12
 class CameraWorker:
     """Captures frames continuously in a background thread."""
 
+    SENSOR_W = 1280
+    SENSOR_H = 1024
+
     def __init__(self, exposure_ms=100, gain=10):
         self.exposure_ms = exposure_ms
         self.gain = gain
+        self.roi_size = 0           # 0 = full frame; else 128/256/512
+        self.roi_cx = self.SENSOR_W // 2
+        self.roi_cy = self.SENSOR_H // 2
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._latest_jpeg = None
-        self._pending_params = None   # (exposure_ms, gain)
+        self._pending_params = None   # dict of changed params
         self._fps = 0.0
         self._error = None
         self._auto_stretch = True
@@ -116,14 +122,37 @@ class CameraWorker:
         if self._thread:
             self._thread.join(timeout=10)
 
-    def set_params(self, exposure_ms=None, gain=None, auto_stretch=None):
+    @staticmethod
+    def _roi_xywh(roi_size, roi_cx, roi_cy, sensor_w, sensor_h):
+        """Return (x, y, w, h) clamped to sensor bounds."""
+        if roi_size == 0:
+            return 0, 0, sensor_w, sensor_h
+        w = h = roi_size
+        x = max(0, min(roi_cx - w // 2, sensor_w - w))
+        y = max(0, min(roi_cy - h // 2, sensor_h - h))
+        return x, y, w, h
+
+    def set_params(self, exposure_ms=None, gain=None, auto_stretch=None,
+                   roi_size=None, roi_cx=None, roi_cy=None):
         with self._lock:
             if auto_stretch is not None:
                 self._auto_stretch = auto_stretch
-            if exposure_ms is not None or gain is not None:
-                new_exp = exposure_ms if exposure_ms is not None else self.exposure_ms
-                new_gain = gain if gain is not None else self.gain
-                self._pending_params = (new_exp, new_gain)
+            needs_restart = (exposure_ms is not None or gain is not None
+                             or roi_size is not None or roi_cx is not None
+                             or roi_cy is not None)
+            if needs_restart:
+                pending = self._pending_params or {}
+                if exposure_ms is not None:
+                    pending['exposure_ms'] = exposure_ms
+                if gain is not None:
+                    pending['gain'] = gain
+                if roi_size is not None:
+                    pending['roi_size'] = roi_size
+                if roi_cx is not None:
+                    pending['roi_cx'] = roi_cx
+                if roi_cy is not None:
+                    pending['roi_cy'] = roi_cy
+                self._pending_params = pending
 
     def get_jpeg(self):
         with self._lock:
@@ -136,6 +165,11 @@ class CameraWorker:
                 'exposure_ms': self.exposure_ms,
                 'gain': self.gain,
                 'auto_stretch': self._auto_stretch,
+                'roi_size': self.roi_size,
+                'roi_cx': self.roi_cx,
+                'roi_cy': self.roi_cy,
+                'sensor_w': self.SENSOR_W,
+                'sensor_h': self.SENSOR_H,
                 'error': self._error,
             }
 
@@ -194,8 +228,13 @@ class CameraWorker:
                                    byref(imagew), byref(imageh),
                                    byref(pixelw), byref(pixelh), byref(bpp))
 
+            sensor_w = imagew.value
+            sensor_h = imageh.value
+
             sdk.SetQHYCCDBinMode(handle, 1, 1)
-            sdk.SetQHYCCDResolution(handle, 0, 0, imagew.value, imageh.value)
+            rx, ry, rw, rh = self._roi_xywh(
+                self.roi_size, self.roi_cx, self.roi_cy, sensor_w, sensor_h)
+            sdk.SetQHYCCDResolution(handle, rx, ry, rw, rh)
             sdk.SetQHYCCDParam(handle, CONTROL_USBTRAFFIC, 30)
             sdk.SetQHYCCDParam(handle, CONTROL_SPEED, 0)
             sdk.SetQHYCCDParam(handle, CONTROL_TRANSFERBIT, 8)
@@ -210,27 +249,46 @@ class CameraWorker:
             if ret != QHYCCD_SUCCESS:
                 raise RuntimeError(f"BeginQHYCCDLive failed: {ret}")
 
-            print(f"Camera ready: {imagew.value}x{imageh.value}, "
+            roi_label = f"{rw}x{rh}" if self.roi_size else "full"
+            print(f"Camera ready: {sensor_w}x{sensor_h}, ROI={roi_label}, "
                   f"exposure={self.exposure_ms}ms, gain={self.gain}")
 
             fps_frames = 0
             fps_t = time.time()
 
             while not self._stop_event.is_set():
-                # Apply any queued parameter change
+                # Apply any queued parameter changes
                 with self._lock:
                     pending = self._pending_params
                     self._pending_params = None
 
                 if pending:
-                    exp_ms, gain = pending
                     sdk.StopQHYCCDLive(handle)
+                    with self._lock:
+                        if 'exposure_ms' in pending:
+                            self.exposure_ms = pending['exposure_ms']
+                        if 'gain' in pending:
+                            self.gain = pending['gain']
+                        if 'roi_size' in pending:
+                            self.roi_size = pending['roi_size']
+                        if 'roi_cx' in pending:
+                            self.roi_cx = pending['roi_cx']
+                        if 'roi_cy' in pending:
+                            self.roi_cy = pending['roi_cy']
+                        exp_ms = self.exposure_ms
+                        gain = self.gain
+                        roi_size = self.roi_size
+                        roi_cx = self.roi_cx
+                        roi_cy = self.roi_cy
+                    rx, ry, rw, rh = self._roi_xywh(
+                        roi_size, roi_cx, roi_cy, sensor_w, sensor_h)
+                    sdk.SetQHYCCDResolution(handle, rx, ry, rw, rh)
                     sdk.SetQHYCCDParam(handle, CONTROL_GAIN, gain)
                     sdk.SetQHYCCDParam(handle, CONTROL_EXPOSURE, exp_ms * 1000)
-                    with self._lock:
-                        self.exposure_ms = exp_ms
-                        self.gain = gain
                     sdk.BeginQHYCCDLive(handle)
+                    roi_label = f"{rw}x{rh}" if roi_size else "full"
+                    print(f"Params updated: ROI={roi_label} @({rx},{ry}), "
+                          f"exp={exp_ms}ms, gain={gain}")
 
                 ret = sdk.GetQHYCCDLiveFrame(
                     handle, byref(w), byref(h), byref(bpp_out), byref(channels), img_data
@@ -412,6 +470,25 @@ HTML = r"""<!DOCTYPE html>
   .toggle-row span { font-size: 13px; }
   .divider { border: none; border-top: 1px solid #2a2a2a; }
   .hint { font-size: 11px; color: #555; line-height: 1.5; }
+  .btn-group { display: flex; gap: 4px; flex-wrap: wrap; }
+  .roi-btn {
+    flex: 1;
+    min-width: 44px;
+    padding: 5px 4px;
+    background: #1e1e1e;
+    border: 1px solid #444;
+    color: #aaa;
+    border-radius: 3px;
+    font-family: inherit;
+    font-size: 11px;
+    cursor: pointer;
+    text-align: center;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+  }
+  .roi-btn:hover { border-color: #7eb8f7; color: #e0e0e0; }
+  .roi-btn.active { background: #1c3a5e; border-color: #7eb8f7; color: #7eb8f7; }
+  .center-row { display: flex; gap: 4px; align-items: center; margin-top: 8px; font-size: 11px; color: #888; }
+  .center-row input[type=number] { width: 56px; font-size: 11px; }
 </style>
 </head>
 <body>
@@ -465,6 +542,25 @@ HTML = r"""<!DOCTYPE html>
         <span>Crosshair</span>
       </label>
       </div>
+    </div>
+
+    <hr class="divider">
+
+    <div class="ctrl-group">
+      <label>Region of Interest</label>
+      <div class="btn-group">
+        <button class="roi-btn" data-size="128">128²</button>
+        <button class="roi-btn" data-size="256">256²</button>
+        <button class="roi-btn" data-size="512">512²</button>
+        <button class="roi-btn active" data-size="0">Full</button>
+      </div>
+      <div class="center-row">
+        <span>Center X:</span>
+        <input type="number" id="roi-cx" min="0" max="1280" value="640">
+        <span>Y:</span>
+        <input type="number" id="roi-cy" min="0" max="1024" value="512">
+      </div>
+      <div style="margin-top:4px;font-size:10px;color:#555;">Click image to set center (coming soon)</div>
     </div>
 
     <hr class="divider">
@@ -593,6 +689,39 @@ HTML = r"""<!DOCTYPE html>
   setInterval(pollHistogram, 500);
   pollHistogram();
 
+  // ROI controls
+  const roiBtns = document.querySelectorAll('.roi-btn');
+  const roiCxInput = document.getElementById('roi-cx');
+  const roiCyInput = document.getElementById('roi-cy');
+  let currentRoiSize = 0;
+
+  function setActiveRoiBtn(size) {
+    roiBtns.forEach(b => b.classList.toggle('active', parseInt(b.dataset.size) === size));
+  }
+
+  function sendRoi(size, cx, cy) {
+    fetch('/api/params', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ roi_size: size, roi_cx: cx, roi_cy: cy }),
+    });
+  }
+
+  roiBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      currentRoiSize = parseInt(btn.dataset.size);
+      setActiveRoiBtn(currentRoiSize);
+      sendRoi(currentRoiSize, parseInt(roiCxInput.value), parseInt(roiCyInput.value));
+    });
+  });
+
+  roiCxInput.addEventListener('change', () => {
+    sendRoi(currentRoiSize, parseInt(roiCxInput.value), parseInt(roiCyInput.value));
+  });
+  roiCyInput.addEventListener('change', () => {
+    sendRoi(currentRoiSize, parseInt(roiCxInput.value), parseInt(roiCyInput.value));
+  });
+
   // Load initial params from server
   fetch('/api/params')
     .then(r => r.json())
@@ -602,6 +731,14 @@ HTML = r"""<!DOCTYPE html>
       gainSlider.value = d.gain;
       gainNum.value    = d.gain;
       chkStretch.checked = d.auto_stretch;
+      if (d.roi_size !== undefined) {
+        currentRoiSize = d.roi_size;
+        setActiveRoiBtn(currentRoiSize);
+      }
+      if (d.roi_cx !== undefined) roiCxInput.value = d.roi_cx;
+      if (d.roi_cy !== undefined) roiCyInput.value = d.roi_cy;
+      if (d.sensor_w !== undefined) roiCxInput.max = d.sensor_w;
+      if (d.sensor_h !== undefined) roiCyInput.max = d.sensor_h;
     });
 })();
 </script>
@@ -651,6 +788,9 @@ def params():
             exposure_ms=data.get('exposure_ms'),
             gain=data.get('gain'),
             auto_stretch=data.get('auto_stretch'),
+            roi_size=data.get('roi_size'),
+            roi_cx=data.get('roi_cx'),
+            roi_cy=data.get('roi_cy'),
         )
         return jsonify({'ok': True})
     return jsonify(camera.get_stats())
