@@ -114,6 +114,7 @@ class CameraWorker:
         self._histogram = None   # list of 256 counts
         self._hist_stats = None  # (min_adu, median_adu, max_adu)
         self._latest_raw = None  # latest raw numpy array (for on-demand detection)
+        self.pixel_size_um = None  # set from GetQHYCCDChipInfo (µm, square pixels)
         self._selected_star = None    # {'x': float, 'y': float} in ROI frame coords
         self._star_measurement = None # latest measure_star() result
         self._thread = None
@@ -199,6 +200,7 @@ class CameraWorker:
                 'sensor_w': self.SENSOR_W,
                 'sensor_h': self.SENSOR_H,
                 'error': self._error,
+                'pixel_size_um':  self.pixel_size_um,
                 'star_selected':  self._selected_star is not None,
                 'star_fwhm':      meas['fwhm']            if meas else None,
                 'star_peak':      meas['peak']            if meas else None,
@@ -263,6 +265,10 @@ class CameraWorker:
 
             sensor_w = imagew.value
             sensor_h = imageh.value
+            px_um = pixelw.value  # µm; assume square pixels
+            if px_um > 0:
+                with self._lock:
+                    self.pixel_size_um = round(px_um, 2)
 
             sdk.SetQHYCCDBinMode(handle, 1, 1)
             rx, ry, rw, rh = self._roi_xywh(
@@ -421,6 +427,25 @@ HTML = r"""<!DOCTYPE html>
   #header h1 { font-size: 16px; color: #7eb8f7; letter-spacing: 1px; }
   #stats { display: flex; gap: 16px; font-size: 12px; color: #aaa; }
   .stat-val { color: #7eb8f7; font-weight: bold; }
+  #hdr-optics {
+    display: none; align-items: baseline; gap: 6px;
+    font-size: 12px; color: #777;
+    border-left: 1px solid #2a2a3a; padding-left: 16px;
+  }
+  #hdr-optics .stat-val { font-size: 12px; }
+  .hdr-sep { color: #333; }
+  /* Optics sidebar */
+  .optics-row {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-top: 6px; font-size: 12px; color: #888;
+  }
+  .optics-row label { color: #777; }
+  .optics-inp-wrap { display: flex; align-items: center; gap: 4px; }
+  .optics-inp-wrap input[type=number] { width: 66px; font-size: 12px; }
+  .optics-unit { font-size: 11px; color: #555; }
+  .optics-src  { font-size: 10px; color: #486; margin-left: 3px; }
+  .inp-error   { border-color: #903030 !important; outline: none; }
+  .inp-ok      { border-color: #2a6a3a !important; }
   #error-banner {
     display: none;
     background: #5c1a1a;
@@ -629,6 +654,14 @@ HTML = r"""<!DOCTYPE html>
     <span>Exp: <span class="stat-val" id="s-exp">--</span> ms</span>
     <span>Gain: <span class="stat-val" id="s-gain">--</span></span>
   </div>
+  <div id="hdr-optics">
+    <span class="stat-val" id="hdr-scale">--</span>
+    <span>″/px</span>
+    <span class="hdr-sep">·</span>
+    <span id="hdr-dims">--</span>
+    <span class="hdr-sep">▸</span>
+    <span class="stat-val" id="hdr-fov">--</span>
+  </div>
 </div>
 <div id="error-banner"></div>
 
@@ -699,6 +732,24 @@ HTML = r"""<!DOCTYPE html>
         </div>
       </div>
       <button class="btn-clear-roi" id="btn-clear-roi">✕ Clear ROI</button>
+    </div>
+
+    <div class="ctrl-group">
+      <div class="ctrl-label">Optics</div>
+      <div class="optics-row">
+        <label>Focal length</label>
+        <div class="optics-inp-wrap">
+          <input type="number" id="inp-focal" min="10" max="50000" step="1" placeholder="mm">
+          <span class="optics-unit">mm</span>
+        </div>
+      </div>
+      <div class="optics-row">
+        <label>Pixel size <span class="optics-src" id="px-src"></span></label>
+        <div class="optics-inp-wrap">
+          <input type="number" id="inp-pixel" min="0.5" max="30" step="0.01" placeholder="µm">
+          <span class="optics-unit">µm</span>
+        </div>
+      </div>
     </div>
 
     <div class="ctrl-group">
@@ -833,6 +884,8 @@ HTML = r"""<!DOCTYPE html>
         if (d.sensor_h  !== undefined) camState.sensor_h  = d.sensor_h;
         if (d.roi_size  > 0)           lastSubRoiSize      = d.roi_size;
         updateClearBtn();
+        if (d.pixel_size_um) maybeSetCameraPixel(d.pixel_size_um);
+        updateScaleHeader();
         updateStarStats(d);
         drawRoiOverlay();
       })
@@ -1138,6 +1191,106 @@ HTML = r"""<!DOCTYPE html>
     if (!sensor) return;
     setPendingCenter(sensor.cx, sensor.cy);
   });
+
+  // =========================================================
+  // Optics — pixel scale and field of view
+  // =========================================================
+
+  const inpFocal = document.getElementById('inp-focal');
+  const inpPixel = document.getElementById('inp-pixel');
+
+  // Working values (validated); null = not yet set / invalid
+  let optFocalMm = null;
+  let optPixelUm = null;
+  let pixelFromCamera = false;
+
+  // ---- localStorage persistence ----
+  (function loadOpticsSaved() {
+    const fl = parseFloat(localStorage.getItem('qhy_focal_mm'));
+    if (fl > 0) { inpFocal.value = fl; optFocalMm = fl; }
+    const px = parseFloat(localStorage.getItem('qhy_pixel_um'));
+    if (px > 0) { inpPixel.value = px; optPixelUm = px; }
+  })();
+
+  // ---- pixel scale math ----
+  // scale  [arcsec/px] = pixel_um * 206.265 / focal_mm
+  // fov_as [arcsec]    = pixels * scale
+  function calcScale() {
+    if (!optFocalMm || !optPixelUm) return null;
+    return (optPixelUm * 206.265) / optFocalMm;
+  }
+
+  function fmtAngle(arcsec) {
+    if      (arcsec >= 3600) return (arcsec / 3600).toFixed(2) + '\u00b0';
+    else if (arcsec >= 60  ) return (arcsec / 60  ).toFixed(1) + '\u2032';
+    else                     return arcsec.toFixed(0) + '\u2033';
+  }
+
+  function updateScaleHeader() {
+    const scale = calcScale();
+    const el    = document.getElementById('hdr-optics');
+    if (!scale) { el.style.display = 'none'; return; }
+
+    // Current frame dimensions
+    const fw = camState.roi_size > 0 ? camState.roi_size : camState.sensor_w;
+    const fh = camState.roi_size > 0 ? camState.roi_size : camState.sensor_h;
+
+    const scaleStr = scale < 10
+      ? scale.toFixed(2)
+      : scale.toFixed(1);
+    const fovStr = fmtAngle(fw * scale) + '\u00d7' + fmtAngle(fh * scale);
+
+    document.getElementById('hdr-scale').textContent = scaleStr;
+    document.getElementById('hdr-dims' ).textContent = `${fw}\u00d7${fh}`;
+    document.getElementById('hdr-fov'  ).textContent = fovStr;
+    el.style.display = 'flex';
+  }
+
+  // ---- input validation ----
+  function validateOpticInput(input, min, max) {
+    const v = parseFloat(input.value);
+    const ok = Number.isFinite(v) && v >= min && v <= max;
+    input.classList.toggle('inp-error', !ok && input.value !== '');
+    input.classList.toggle('inp-ok',     ok);
+    return ok ? v : null;
+  }
+
+  inpFocal.addEventListener('input', () => {
+    const v = validateOpticInput(inpFocal, 10, 50000);
+    if (v !== null) {
+      optFocalMm = v;
+      localStorage.setItem('qhy_focal_mm', v);
+    } else {
+      optFocalMm = null;
+    }
+    updateScaleHeader();
+  });
+
+  inpPixel.addEventListener('input', () => {
+    const v = validateOpticInput(inpPixel, 0.5, 30);
+    if (v !== null) {
+      optPixelUm = v;
+      localStorage.setItem('qhy_pixel_um', v);
+    } else {
+      optPixelUm = null;
+    }
+    updateScaleHeader();
+  });
+
+  // Called from pollStats when the camera reports its pixel size
+  function maybeSetCameraPixel(px_um) {
+    if (!px_um || pixelFromCamera) return;  // already set from camera
+    pixelFromCamera = true;
+    // Pre-populate only if the user has not typed their own value
+    if (!localStorage.getItem('qhy_pixel_um')) {
+      inpPixel.value = px_um;
+      inpPixel.classList.add('inp-ok');
+      optPixelUm = px_um;
+      localStorage.setItem('qhy_pixel_um', px_um);
+      updateScaleHeader();
+    }
+    document.getElementById('px-src').textContent = '(camera)';
+  }
 
   // =========================================================
   // Star Analysis
@@ -1455,7 +1608,9 @@ HTML = r"""<!DOCTYPE html>
       if (d.sensor_w  !== undefined) { camState.sensor_w = d.sensor_w; roiCxInput.max   = d.sensor_w; }
       if (d.sensor_h  !== undefined) { camState.sensor_h = d.sensor_h; roiCyInput.max   = d.sensor_h; }
       if (d.roi_size  > 0) lastSubRoiSize = d.roi_size;
+      if (d.pixel_size_um) maybeSetCameraPixel(d.pixel_size_um);
       updateClearBtn();
+      updateScaleHeader();
     });
 })();
 </script>
