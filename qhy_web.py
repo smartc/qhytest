@@ -489,6 +489,28 @@ HTML = r"""<!DOCTYPE html>
   .roi-btn.active { background: #1c3a5e; border-color: #7eb8f7; color: #7eb8f7; }
   .center-row { display: flex; gap: 4px; align-items: center; margin-top: 8px; font-size: 11px; color: #888; }
   .center-row input[type=number] { width: 56px; font-size: 11px; }
+  #roi-overlay {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    cursor: crosshair; z-index: 2;
+  }
+  #roi-overlay.idle { cursor: crosshair; }
+  .roi-pending { display: none; margin-top: 10px; }
+  .roi-pending.visible { display: block; }
+  .pending-info { font-size: 11px; color: #aaa; margin-bottom: 6px; }
+  .pending-info span { color: #7eb8f7; }
+  .apply-row { display: flex; gap: 5px; }
+  .btn-apply {
+    flex: 1; padding: 6px 4px;
+    background: #1c3a5e; border: 1px solid #7eb8f7; color: #7eb8f7;
+    border-radius: 3px; font-family: inherit; font-size: 12px; cursor: pointer;
+  }
+  .btn-apply:hover { background: #2a5080; }
+  .btn-cancel-pending {
+    flex: 1; padding: 6px 4px;
+    background: #1e1e1e; border: 1px solid #444; color: #888;
+    border-radius: 3px; font-family: inherit; font-size: 12px; cursor: pointer;
+  }
+  .btn-cancel-pending:hover { border-color: #aaa; color: #ccc; }
 </style>
 </head>
 <body>
@@ -505,8 +527,9 @@ HTML = r"""<!DOCTYPE html>
 
 <div id="main">
   <div id="preview-wrap">
-    <img id="stream-img" src="/stream" alt="Camera stream">
+    <img id="stream-img" src="/stream" alt="Camera stream" style="pointer-events:none;">
     <div id="crosshair"></div>
+    <canvas id="roi-overlay"></canvas>
   </div>
 
   <div id="controls">
@@ -560,7 +583,14 @@ HTML = r"""<!DOCTYPE html>
         <span>Y:</span>
         <input type="number" id="roi-cy" min="0" max="1024" value="512">
       </div>
-      <div style="margin-top:4px;font-size:10px;color:#555;">Click image to set center (coming soon)</div>
+      <div style="margin-top:5px;font-size:10px;color:#555;">Click image to position ROI</div>
+      <div class="roi-pending" id="roi-pending">
+        <div class="pending-info">→ <span id="pending-coords">--</span> px</div>
+        <div class="apply-row">
+          <button class="btn-apply" id="btn-apply-roi">Apply</button>
+          <button class="btn-cancel-pending" id="btn-cancel-roi">Cancel</button>
+        </div>
+      </div>
     </div>
 
     <hr class="divider">
@@ -650,6 +680,14 @@ HTML = r"""<!DOCTYPE html>
           errorBanner.textContent = 'Camera error: ' + d.error;
           errorBanner.style.display = 'block';
         }
+        // Keep camState in sync so overlay coordinates are always correct
+        if (d.roi_size  !== undefined) camState.roi_size  = d.roi_size;
+        if (d.roi_cx    !== undefined) camState.roi_cx    = d.roi_cx;
+        if (d.roi_cy    !== undefined) camState.roi_cy    = d.roi_cy;
+        if (d.sensor_w  !== undefined) camState.sensor_w  = d.sensor_w;
+        if (d.sensor_h  !== undefined) camState.sensor_h  = d.sensor_h;
+        if (d.roi_size  > 0)           lastSubRoiSize      = d.roi_size;
+        if (pendingCenter)             drawRoiOverlay();   // redraw if position changed
       })
       .catch(() => {});
   }
@@ -689,11 +727,131 @@ HTML = r"""<!DOCTYPE html>
   setInterval(pollHistogram, 500);
   pollHistogram();
 
-  // ROI controls
-  const roiBtns = document.querySelectorAll('.roi-btn');
+  // --------------- ROI state ---------------
+  const roiBtns    = document.querySelectorAll('.roi-btn');
   const roiCxInput = document.getElementById('roi-cx');
   const roiCyInput = document.getElementById('roi-cy');
-  let currentRoiSize = 0;
+  const roiCanvas  = document.getElementById('roi-overlay');
+  const roiCtx     = roiCanvas.getContext('2d');
+
+  // Mirrors of server state, updated from pollStats
+  const camState = { roi_size: 0, roi_cx: 640, roi_cy: 512, sensor_w: 1280, sensor_h: 1024 };
+
+  // Last non-zero roi_size, used as preview size when full-frame is active
+  let lastSubRoiSize = 256;
+
+  // Pending click: {cx, cy} in sensor coords, or null
+  let pendingCenter = null;
+
+  // ---- helpers ----
+
+  function roiXYWH(size, cx, cy, sw, sh) {
+    if (size === 0) return { x: 0, y: 0, w: sw, h: sh };
+    const x = Math.max(0, Math.min(cx - size / 2, sw - size));
+    const y = Math.max(0, Math.min(cy - size / 2, sh - size));
+    return { x, y, w: size, h: size };
+  }
+
+  // Returns the position/size of the rendered image content within the canvas.
+  // The <img> uses object-fit:contain but the element itself is already
+  // sized to fit (max-w/h:100% in a flex-center container), so
+  // getBoundingClientRect gives the content area directly.
+  function getImgRenderInfo() {
+    const img = document.getElementById('stream-img');
+    const iRect = img.getBoundingClientRect();
+    const cRect = roiCanvas.getBoundingClientRect();
+    const offX = iRect.left - cRect.left;
+    const offY = iRect.top  - cRect.top;
+    const renderW = iRect.width;
+    const renderH = iRect.height;
+    const curRoi = roiXYWH(camState.roi_size, camState.roi_cx, camState.roi_cy,
+                            camState.sensor_w, camState.sensor_h);
+    return { offX, offY, renderW, renderH, curRoi };
+  }
+
+  // Canvas pixel → sensor coordinate (null if outside the image).
+  function canvasToSensor(cx, cy) {
+    const { offX, offY, renderW, renderH, curRoi } = getImgRenderInfo();
+    const nx = (cx - offX) / renderW;
+    const ny = (cy - offY) / renderH;
+    if (nx < 0 || nx > 1 || ny < 0 || ny > 1) return null;
+    return {
+      cx: Math.round(curRoi.x + nx * curRoi.w),
+      cy: Math.round(curRoi.y + ny * curRoi.h),
+    };
+  }
+
+  function drawRoiOverlay() {
+    roiCtx.clearRect(0, 0, roiCanvas.width, roiCanvas.height);
+    if (!pendingCenter) return;
+
+    const { offX, offY, renderW, renderH, curRoi } = getImgRenderInfo();
+    const { sensor_w, sensor_h } = camState;
+
+    // Use active sub-ROI size; fall back to lastSubRoiSize if currently full-frame
+    const previewSize = camState.roi_size > 0 ? camState.roi_size : lastSubRoiSize;
+    const proposed = roiXYWH(previewSize, pendingCenter.cx, pendingCenter.cy, sensor_w, sensor_h);
+
+    // Convert a sensor coord to canvas pixel
+    const toCanvas = (sx, sy) => ({
+      x: offX + ((sx - curRoi.x) / curRoi.w) * renderW,
+      y: offY + ((sy - curRoi.y) / curRoi.h) * renderH,
+    });
+
+    const tl = toCanvas(proposed.x, proposed.y);
+    const br = toCanvas(proposed.x + proposed.w, proposed.y + proposed.h);
+    const bw = br.x - tl.x;
+    const bh = br.y - tl.y;
+
+    // Dim everything outside the proposed ROI box (evenodd punch-through)
+    roiCtx.save();
+    roiCtx.beginPath();
+    roiCtx.rect(0, 0, roiCanvas.width, roiCanvas.height);
+    roiCtx.rect(tl.x, tl.y, bw, bh);
+    roiCtx.fillStyle = 'rgba(0,0,0,0.58)';
+    roiCtx.fill('evenodd');
+
+    // ROI box border
+    roiCtx.strokeStyle = '#7eb8f7';
+    roiCtx.lineWidth = 1.5;
+    roiCtx.strokeRect(tl.x, tl.y, bw, bh);
+
+    // Small crosshair at proposed center
+    const cc = toCanvas(pendingCenter.cx, pendingCenter.cy);
+    roiCtx.strokeStyle = 'rgba(126,184,247,0.9)';
+    roiCtx.lineWidth = 1;
+    roiCtx.beginPath();
+    roiCtx.moveTo(cc.x - 10, cc.y); roiCtx.lineTo(cc.x + 10, cc.y);
+    roiCtx.moveTo(cc.x, cc.y - 10); roiCtx.lineTo(cc.x, cc.y + 10);
+    roiCtx.stroke();
+    roiCtx.restore();
+  }
+
+  function setPendingCenter(sensorCx, sensorCy) {
+    pendingCenter = { cx: sensorCx, cy: sensorCy };
+    roiCxInput.value = sensorCx;
+    roiCyInput.value = sensorCy;
+    document.getElementById('pending-coords').textContent = `${sensorCx}, ${sensorCy}`;
+    document.getElementById('roi-pending').classList.add('visible');
+    drawRoiOverlay();
+  }
+
+  function cancelPending() {
+    pendingCenter = null;
+    document.getElementById('roi-pending').classList.remove('visible');
+    roiCtx.clearRect(0, 0, roiCanvas.width, roiCanvas.height);
+  }
+
+  function applyPending() {
+    if (!pendingCenter) return;
+    const applySize = camState.roi_size > 0 ? camState.roi_size : lastSubRoiSize;
+    // Update active button if size changed (full→sub)
+    if (applySize !== camState.roi_size) setActiveRoiBtn(applySize);
+    sendRoi(applySize, pendingCenter.cx, pendingCenter.cy);
+    cancelPending();
+  }
+
+  // ---- button / input wiring ----
 
   function setActiveRoiBtn(size) {
     roiBtns.forEach(b => b.classList.toggle('active', parseInt(b.dataset.size) === size));
@@ -709,18 +867,51 @@ HTML = r"""<!DOCTYPE html>
 
   roiBtns.forEach(btn => {
     btn.addEventListener('click', () => {
-      currentRoiSize = parseInt(btn.dataset.size);
-      setActiveRoiBtn(currentRoiSize);
-      sendRoi(currentRoiSize, parseInt(roiCxInput.value), parseInt(roiCyInput.value));
+      const size = parseInt(btn.dataset.size);
+      camState.roi_size = size;
+      if (size > 0) lastSubRoiSize = size;
+      setActiveRoiBtn(size);
+      if (pendingCenter) {
+        // Redraw with new size, don't send yet
+        drawRoiOverlay();
+      } else {
+        sendRoi(size, parseInt(roiCxInput.value), parseInt(roiCyInput.value));
+      }
     });
   });
 
   roiCxInput.addEventListener('change', () => {
-    sendRoi(currentRoiSize, parseInt(roiCxInput.value), parseInt(roiCyInput.value));
+    if (pendingCenter) setPendingCenter(parseInt(roiCxInput.value), pendingCenter.cy);
+    else sendRoi(camState.roi_size, parseInt(roiCxInput.value), parseInt(roiCyInput.value));
   });
   roiCyInput.addEventListener('change', () => {
-    sendRoi(currentRoiSize, parseInt(roiCxInput.value), parseInt(roiCyInput.value));
+    if (pendingCenter) setPendingCenter(pendingCenter.cx, parseInt(roiCyInput.value));
+    else sendRoi(camState.roi_size, parseInt(roiCxInput.value), parseInt(roiCyInput.value));
   });
+
+  document.getElementById('btn-apply-roi').addEventListener('click', applyPending);
+  document.getElementById('btn-cancel-roi').addEventListener('click', cancelPending);
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') cancelPending(); });
+
+  // ---- canvas click ----
+
+  roiCanvas.addEventListener('click', e => {
+    const rect = roiCanvas.getBoundingClientRect();
+    const sensor = canvasToSensor(e.clientX - rect.left, e.clientY - rect.top);
+    if (!sensor) return;
+    setPendingCenter(sensor.cx, sensor.cy);
+  });
+
+  // ---- resize: keep canvas pixel dims in sync with layout dims ----
+
+  function resizeCanvas() {
+    const wrap = document.getElementById('preview-wrap');
+    roiCanvas.width  = wrap.clientWidth;
+    roiCanvas.height = wrap.clientHeight;
+    drawRoiOverlay();
+  }
+  window.addEventListener('resize', resizeCanvas);
+  resizeCanvas();
 
   // Load initial params from server
   fetch('/api/params')
@@ -731,14 +922,12 @@ HTML = r"""<!DOCTYPE html>
       gainSlider.value = d.gain;
       gainNum.value    = d.gain;
       chkStretch.checked = d.auto_stretch;
-      if (d.roi_size !== undefined) {
-        currentRoiSize = d.roi_size;
-        setActiveRoiBtn(currentRoiSize);
-      }
-      if (d.roi_cx !== undefined) roiCxInput.value = d.roi_cx;
-      if (d.roi_cy !== undefined) roiCyInput.value = d.roi_cy;
-      if (d.sensor_w !== undefined) roiCxInput.max = d.sensor_w;
-      if (d.sensor_h !== undefined) roiCyInput.max = d.sensor_h;
+      if (d.roi_size  !== undefined) { camState.roi_size = d.roi_size; setActiveRoiBtn(d.roi_size); }
+      if (d.roi_cx    !== undefined) { camState.roi_cx   = d.roi_cx;   roiCxInput.value = d.roi_cx; }
+      if (d.roi_cy    !== undefined) { camState.roi_cy   = d.roi_cy;   roiCyInput.value = d.roi_cy; }
+      if (d.sensor_w  !== undefined) { camState.sensor_w = d.sensor_w; roiCxInput.max   = d.sensor_w; }
+      if (d.sensor_h  !== undefined) { camState.sensor_h = d.sensor_h; roiCyInput.max   = d.sensor_h; }
+      if (d.roi_size  > 0) lastSubRoiSize = d.roi_size;
     });
 })();
 </script>
