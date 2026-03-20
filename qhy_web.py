@@ -52,6 +52,7 @@ except ImportError:
     raise SystemExit(1)
 
 import star_utils
+import seeing_calculator
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +140,15 @@ class CameraWorker:
         self._selected_star = None    # {'x': float, 'y': float} in ROI frame coords
         self._star_measurement = None # latest measure_star() result
         self._thread = None
+        self._seeing_calc = seeing_calculator.SeeingCalculator(
+            seeing_calculator.SeeingConfig(
+                focal_length_mm=130.0,
+                aperture_mm=30.0,
+                pixel_size_um=5.2,
+                method="BOTH",
+                window_frames=200,
+            )
+        )
 
     def start(self):
         self._thread = threading.Thread(target=self._run, daemon=True, name="camera")
@@ -394,6 +404,17 @@ class CameraWorker:
                             if meas is not None:
                                 with self._lock:
                                     self._star_measurement = meas
+                                # Feed frame to seeing calculator
+                                fr = seeing_calculator.FrameResult(
+                                    timestamp=time.perf_counter(),
+                                    x_centroid=selected['x'],
+                                    y_centroid=selected['y'],
+                                    fwhm_px=meas.get('fwhm'),
+                                    peak_adu=int(meas.get('peak', 0)),
+                                    valid=(meas.get('peak', 0) <= 240
+                                           and meas.get('fwhm') is not None),
+                                )
+                                self._seeing_calc.add_frame(fr)
                         except Exception:
                             pass
 
@@ -1725,6 +1746,20 @@ def params():
         )
         return jsonify({'ok': True})
     return jsonify(camera.get_stats())
+
+
+@app.route('/api/seeing')
+def api_seeing():
+    est = camera._seeing_calc.get_latest()
+    if est is None:
+        return jsonify({'status': 'no_data'})
+    return jsonify(camera._seeing_calc.to_dict(est))
+
+
+@app.route('/api/seeing/history')
+def api_seeing_history():
+    history = camera._seeing_calc.get_history(30)
+    return jsonify([camera._seeing_calc.to_dict(e) for e in history])
 
 
 # ---------------------------------------------------------------------------
