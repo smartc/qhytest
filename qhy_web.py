@@ -511,6 +511,13 @@ HTML = r"""<!DOCTYPE html>
     border-radius: 3px; font-family: inherit; font-size: 12px; cursor: pointer;
   }
   .btn-cancel-pending:hover { border-color: #aaa; color: #ccc; }
+  .btn-clear-roi {
+    display: none; width: 100%; margin-top: 6px; padding: 6px 4px;
+    background: #2a1515; border: 1px solid #7a2020; color: #c05050;
+    border-radius: 3px; font-family: inherit; font-size: 12px; cursor: pointer;
+  }
+  .btn-clear-roi.visible { display: block; }
+  .btn-clear-roi:hover { background: #3a2020; border-color: #d46060; color: #e07070; }
 </style>
 </head>
 <body>
@@ -591,6 +598,7 @@ HTML = r"""<!DOCTYPE html>
           <button class="btn-cancel-pending" id="btn-cancel-roi">Cancel</button>
         </div>
       </div>
+      <button class="btn-clear-roi" id="btn-clear-roi">✕ Clear ROI</button>
     </div>
 
     <hr class="divider">
@@ -687,7 +695,8 @@ HTML = r"""<!DOCTYPE html>
         if (d.sensor_w  !== undefined) camState.sensor_w  = d.sensor_w;
         if (d.sensor_h  !== undefined) camState.sensor_h  = d.sensor_h;
         if (d.roi_size  > 0)           lastSubRoiSize      = d.roi_size;
-        if (pendingCenter)             drawRoiOverlay();   // redraw if position changed
+        updateClearBtn();
+        drawRoiOverlay();
       })
       .catch(() => {});
   }
@@ -743,6 +752,9 @@ HTML = r"""<!DOCTYPE html>
   // Pending click: {cx, cy} in sensor coords, or null
   let pendingCenter = null;
 
+  // Ghost: the last active sub-ROI shown as a dashed outline when in full-frame mode
+  let ghostRoi = null;
+
   // ---- helpers ----
 
   function roiXYWH(size, cx, cy, sw, sh) {
@@ -783,48 +795,65 @@ HTML = r"""<!DOCTYPE html>
 
   function drawRoiOverlay() {
     roiCtx.clearRect(0, 0, roiCanvas.width, roiCanvas.height);
-    if (!pendingCenter) return;
 
-    const { offX, offY, renderW, renderH, curRoi } = getImgRenderInfo();
-    const { sensor_w, sensor_h } = camState;
+    if (pendingCenter) {
+      const { offX, offY, renderW, renderH, curRoi } = getImgRenderInfo();
+      const { sensor_w, sensor_h } = camState;
+      const previewSize = camState.roi_size > 0 ? camState.roi_size : lastSubRoiSize;
+      const proposed = roiXYWH(previewSize, pendingCenter.cx, pendingCenter.cy, sensor_w, sensor_h);
 
-    // Use active sub-ROI size; fall back to lastSubRoiSize if currently full-frame
-    const previewSize = camState.roi_size > 0 ? camState.roi_size : lastSubRoiSize;
-    const proposed = roiXYWH(previewSize, pendingCenter.cx, pendingCenter.cy, sensor_w, sensor_h);
+      const toCanvas = (sx, sy) => ({
+        x: offX + ((sx - curRoi.x) / curRoi.w) * renderW,
+        y: offY + ((sy - curRoi.y) / curRoi.h) * renderH,
+      });
 
-    // Convert a sensor coord to canvas pixel
-    const toCanvas = (sx, sy) => ({
-      x: offX + ((sx - curRoi.x) / curRoi.w) * renderW,
-      y: offY + ((sy - curRoi.y) / curRoi.h) * renderH,
-    });
+      const tl = toCanvas(proposed.x, proposed.y);
+      const br = toCanvas(proposed.x + proposed.w, proposed.y + proposed.h);
+      const bw = br.x - tl.x;
+      const bh = br.y - tl.y;
 
-    const tl = toCanvas(proposed.x, proposed.y);
-    const br = toCanvas(proposed.x + proposed.w, proposed.y + proposed.h);
-    const bw = br.x - tl.x;
-    const bh = br.y - tl.y;
+      roiCtx.save();
+      roiCtx.beginPath();
+      roiCtx.rect(0, 0, roiCanvas.width, roiCanvas.height);
+      roiCtx.rect(tl.x, tl.y, bw, bh);
+      roiCtx.fillStyle = 'rgba(0,0,0,0.58)';
+      roiCtx.fill('evenodd');
 
-    // Dim everything outside the proposed ROI box (evenodd punch-through)
-    roiCtx.save();
-    roiCtx.beginPath();
-    roiCtx.rect(0, 0, roiCanvas.width, roiCanvas.height);
-    roiCtx.rect(tl.x, tl.y, bw, bh);
-    roiCtx.fillStyle = 'rgba(0,0,0,0.58)';
-    roiCtx.fill('evenodd');
+      roiCtx.strokeStyle = '#7eb8f7';
+      roiCtx.lineWidth = 1.5;
+      roiCtx.strokeRect(tl.x, tl.y, bw, bh);
 
-    // ROI box border
-    roiCtx.strokeStyle = '#7eb8f7';
-    roiCtx.lineWidth = 1.5;
-    roiCtx.strokeRect(tl.x, tl.y, bw, bh);
+      const cc = toCanvas(pendingCenter.cx, pendingCenter.cy);
+      roiCtx.strokeStyle = 'rgba(126,184,247,0.9)';
+      roiCtx.lineWidth = 1;
+      roiCtx.beginPath();
+      roiCtx.moveTo(cc.x - 10, cc.y); roiCtx.lineTo(cc.x + 10, cc.y);
+      roiCtx.moveTo(cc.x, cc.y - 10); roiCtx.lineTo(cc.x, cc.y + 10);
+      roiCtx.stroke();
+      roiCtx.restore();
+      return;
+    }
 
-    // Small crosshair at proposed center
-    const cc = toCanvas(pendingCenter.cx, pendingCenter.cy);
-    roiCtx.strokeStyle = 'rgba(126,184,247,0.9)';
-    roiCtx.lineWidth = 1;
-    roiCtx.beginPath();
-    roiCtx.moveTo(cc.x - 10, cc.y); roiCtx.lineTo(cc.x + 10, cc.y);
-    roiCtx.moveTo(cc.x, cc.y - 10); roiCtx.lineTo(cc.x, cc.y + 10);
-    roiCtx.stroke();
-    roiCtx.restore();
+    // Ghost: dashed outline of last sub-ROI, shown only in full-frame mode
+    if (ghostRoi && camState.roi_size === 0) {
+      const { offX, offY, renderW, renderH, curRoi } = getImgRenderInfo();
+      const g = roiXYWH(ghostRoi.size, ghostRoi.cx, ghostRoi.cy, camState.sensor_w, camState.sensor_h);
+      const toCanvas = (sx, sy) => ({
+        x: offX + ((sx - curRoi.x) / curRoi.w) * renderW,
+        y: offY + ((sy - curRoi.y) / curRoi.h) * renderH,
+      });
+      const tl = toCanvas(g.x, g.y);
+      const br = toCanvas(g.x + g.w, g.y + g.h);
+      roiCtx.save();
+      roiCtx.strokeStyle = 'rgba(126,184,247,0.45)';
+      roiCtx.lineWidth = 1;
+      roiCtx.setLineDash([4, 4]);
+      roiCtx.strokeRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y);
+      roiCtx.font = '10px monospace';
+      roiCtx.fillStyle = 'rgba(126,184,247,0.55)';
+      roiCtx.fillText(`${ghostRoi.size}²`, tl.x + 3, tl.y + 11);
+      roiCtx.restore();
+    }
   }
 
   function setPendingCenter(sensorCx, sensorCy) {
@@ -839,22 +868,28 @@ HTML = r"""<!DOCTYPE html>
   function cancelPending() {
     pendingCenter = null;
     document.getElementById('roi-pending').classList.remove('visible');
-    roiCtx.clearRect(0, 0, roiCanvas.width, roiCanvas.height);
+    drawRoiOverlay();  // may draw ghost if applicable
   }
 
   function applyPending() {
     if (!pendingCenter) return;
     const applySize = camState.roi_size > 0 ? camState.roi_size : lastSubRoiSize;
-    // Update active button if size changed (full→sub)
     if (applySize !== camState.roi_size) setActiveRoiBtn(applySize);
+    camState.roi_size = applySize;
+    ghostRoi = null;  // entering sub-ROI mode, ghost no longer needed
     sendRoi(applySize, pendingCenter.cx, pendingCenter.cy);
     cancelPending();
+    updateClearBtn();
   }
 
   // ---- button / input wiring ----
 
   function setActiveRoiBtn(size) {
     roiBtns.forEach(b => b.classList.toggle('active', parseInt(b.dataset.size) === size));
+  }
+
+  function updateClearBtn() {
+    document.getElementById('btn-clear-roi').classList.toggle('visible', camState.roi_size > 0);
   }
 
   function sendRoi(size, cx, cy) {
@@ -868,14 +903,30 @@ HTML = r"""<!DOCTYPE html>
   roiBtns.forEach(btn => {
     btn.addEventListener('click', () => {
       const size = parseInt(btn.dataset.size);
-      camState.roi_size = size;
-      if (size > 0) lastSubRoiSize = size;
-      setActiveRoiBtn(size);
-      if (pendingCenter) {
-        // Redraw with new size, don't send yet
-        drawRoiOverlay();
+      if (size === 0) {
+        // Full: apply immediately, save ghost so the old ROI stays visible
+        if (camState.roi_size > 0) {
+          ghostRoi = { size: camState.roi_size, cx: camState.roi_cx, cy: camState.roi_cy };
+        }
+        sendRoi(0, camState.roi_cx, camState.roi_cy);
+        camState.roi_size = 0;
+        cancelPending();  // clears pending, redraws ghost
+        setActiveRoiBtn(0);
+        updateClearBtn();
       } else {
-        sendRoi(size, parseInt(roiCxInput.value), parseInt(roiCyInput.value));
+        // Sub-ROI: update preview size only — don't send to camera yet
+        camState.roi_size = size;
+        lastSubRoiSize = size;
+        setActiveRoiBtn(size);
+        if (pendingCenter) {
+          drawRoiOverlay();
+        } else {
+          // Auto-start pending with the current center so Apply becomes available
+          setPendingCenter(
+            parseInt(roiCxInput.value) || camState.roi_cx,
+            parseInt(roiCyInput.value) || camState.roi_cy,
+          );
+        }
       }
     });
   });
@@ -891,6 +942,16 @@ HTML = r"""<!DOCTYPE html>
 
   document.getElementById('btn-apply-roi').addEventListener('click', applyPending);
   document.getElementById('btn-cancel-roi').addEventListener('click', cancelPending);
+  document.getElementById('btn-clear-roi').addEventListener('click', () => {
+    if (camState.roi_size > 0) {
+      ghostRoi = { size: camState.roi_size, cx: camState.roi_cx, cy: camState.roi_cy };
+    }
+    sendRoi(0, camState.roi_cx, camState.roi_cy);
+    camState.roi_size = 0;
+    cancelPending();
+    setActiveRoiBtn(0);
+    updateClearBtn();
+  });
   document.addEventListener('keydown', e => { if (e.key === 'Escape') cancelPending(); });
 
   // ---- canvas click ----
@@ -928,6 +989,7 @@ HTML = r"""<!DOCTYPE html>
       if (d.sensor_w  !== undefined) { camState.sensor_w = d.sensor_w; roiCxInput.max   = d.sensor_w; }
       if (d.sensor_h  !== undefined) { camState.sensor_h = d.sensor_h; roiCyInput.max   = d.sensor_h; }
       if (d.roi_size  > 0) lastSubRoiSize = d.roi_size;
+      updateClearBtn();
     });
 })();
 </script>
