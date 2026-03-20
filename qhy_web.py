@@ -17,6 +17,27 @@ import threading
 import time
 import io
 import argparse
+import json
+from pathlib import Path
+
+SETTINGS_FILE = Path(__file__).parent / 'qhy_settings.json'
+
+
+def load_settings():
+    """Return persisted {exposure_ms, gain}, or {} if none saved yet."""
+    try:
+        with open(SETTINGS_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_settings(exposure_ms, gain):
+    try:
+        with open(SETTINGS_FILE, 'w') as f:
+            json.dump({'exposure_ms': exposure_ms, 'gain': gain}, f)
+    except OSError as e:
+        print(f"Warning: could not save settings: {e}")
 
 try:
     from flask import Flask, Response, jsonify, request, render_template_string
@@ -163,6 +184,15 @@ class CameraWorker:
                 if roi_cy is not None:
                     pending['roi_cy'] = roi_cy
                 self._pending_params = pending
+
+        if exposure_ms is not None or gain is not None:
+            with self._lock:
+                cur_exp  = self.exposure_ms
+                cur_gain = self.gain
+            save_settings(
+                exposure_ms if exposure_ms is not None else cur_exp,
+                gain        if gain        is not None else cur_gain,
+            )
 
     def get_jpeg(self):
         with self._lock:
@@ -1704,10 +1734,14 @@ def params():
 def main():
     global camera
 
+    saved = load_settings()
+
     parser = argparse.ArgumentParser(description="QHY5-II-M live preview web server")
-    parser.add_argument('-e', '--exposure', type=float, default=100,
+    parser.add_argument('-e', '--exposure', type=float,
+                        default=saved.get('exposure_ms', 100),
                         help='Initial exposure in ms (default: 100)')
-    parser.add_argument('-g', '--gain', type=int, default=10,
+    parser.add_argument('-g', '--gain', type=int,
+                        default=saved.get('gain', 10),
                         help='Initial gain 0-100 (default: 10)')
     parser.add_argument('-p', '--port', type=int, default=5000,
                         help='HTTP port (default: 5000)')
