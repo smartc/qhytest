@@ -22,12 +22,13 @@ fi
 SERVICE_USER="${SUDO_USER:-pi}"
 PORT=5000
 
-for arg in "$@"; do
-    case "$arg" in
-        --user=*)  SERVICE_USER="${arg#--user=}" ;;
-        --user)    ;;  # handled by next iteration via shift; good enough for =form
-        --port=*)  PORT="${arg#--port=}" ;;
-        --port)    ;;
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --user=*)  SERVICE_USER="${1#--user=}";  shift ;;
+        --user)    SERVICE_USER="$2";            shift 2 ;;
+        --port=*)  PORT="${1#--port=}";          shift ;;
+        --port)    PORT="$2";                    shift 2 ;;
+        *)         echo "Unknown argument: $1";  shift ;;
     esac
 done
 
