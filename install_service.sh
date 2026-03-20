@@ -70,8 +70,9 @@ fi
 # Required Python packages
 echo "Checking Python dependencies..."
 missing=()
-for pkg in flask numpy pillow; do
-    if ! "$VENV_PYTHON" -c "import $pkg" 2>/dev/null; then
+declare -A PKG_IMPORT=(["flask"]="flask" ["numpy"]="numpy" ["pillow"]="PIL")
+for pkg in "${!PKG_IMPORT[@]}"; do
+    if ! "$VENV_PYTHON" -c "import ${PKG_IMPORT[$pkg]}" 2>/dev/null; then
         missing+=("$pkg")
     fi
 done
