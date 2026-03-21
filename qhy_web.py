@@ -1424,11 +1424,15 @@ HTML = r"""<!DOCTYPE html>
   }
 
   // ---- Optics limits for seeing methodology ----
-  // Thresholds based on FWHM sampling: seeing ~2" needs FWHM > 2.5px
-  //   scale 0.8"/px → 2" seeing = 2.5px (marginal)
-  //   scale 1.5"/px → 2" seeing = 1.3px (unusable)
-  //   scale 0.15"/px → stars very spread, low SNR per pixel
-  //   scale 0.05"/px → extremely spread, noise-dominated
+  // Two methods: FWHM (needs well-sampled PSF) and centroid variance (works at any scale).
+  // Plate scale determines which method(s) produce reliable results.
+  //
+  //   < 0.05″/px  WARNING  — too fine, noise-dominated, narrow FOV
+  //   0.05–0.15   CAUTION  — fine sampling, low per-pixel SNR
+  //   0.15–0.8    CLEAR    — sweet spot, both methods reliable
+  //   0.8–2.0     CAUTION  — FWHM degrades under good seeing; centroid still valid
+  //   2.0–8.0     WARNING  — FWHM unreliable; centroid-only seeing
+  //   > 8.0       WARNING  — extreme; centroid still works but limited precision
   function checkOpticsLimits(scale) {
     var warnEl    = document.getElementById('optics-warn');
     var cautionEl = document.getElementById('optics-caution');
@@ -1436,42 +1440,39 @@ HTML = r"""<!DOCTYPE html>
     cautionEl.classList.remove('visible');
     if (!scale) return;
 
-    var s = scale.toFixed(2);
+    var s = scale < 10 ? scale.toFixed(2) : scale.toFixed(1);
 
     // ---- Coarse plate scale (undersampled PSF) ----
-    if (scale > 1.5) {
+    if (scale > 8.0) {
       warnEl.innerHTML =
-        '\u26A0 <b>Plate scale too coarse</b> (<span class="banner-scale">' + s + '″/px</span>) ' +
-        '— Stars are under-sampled below ~3″ seeing. FWHM measurement unreliable at this scale.';
+        '\u26A0 <b>Very coarse sampling</b> (<span class="banner-scale">' + s + '″/px</span>) ' +
+        '— Stars are sub-pixel. FWHM method cannot measure seeing. Centroid variance provides estimates but precision is limited.';
+      warnEl.classList.add('visible');
+    } else if (scale > 2.0) {
+      warnEl.innerHTML =
+        '\u26A0 <b>Coarse sampling</b> (<span class="banner-scale">' + s + '″/px</span>) ' +
+        '— FWHM measurements are unreliable at this scale. Seeing estimates rely on centroid variance only.';
       warnEl.classList.add('visible');
     } else if (scale > 0.8) {
       cautionEl.innerHTML =
-        '\u26A0 <b>Coarse sampling</b> (<span class="banner-scale">' + s + '″/px</span>) ' +
-        '— Under good seeing (<2″), stars approach Nyquist limit. Accuracy degrades with improving conditions.';
+        '\u26A0 <b>Approaching coarse</b> (<span class="banner-scale">' + s + '″/px</span>) ' +
+        '— FWHM accuracy degrades under good seeing (<2″). Centroid variance remains valid.';
       cautionEl.classList.add('visible');
     }
 
     // ---- Fine plate scale (oversampled, low SNR) ----
     if (scale < 0.05) {
-      warnEl.innerHTML =
+      // Fine warning on top if coarse warning isn't already there
+      var el = warnEl.classList.contains('visible') ? cautionEl : warnEl;
+      el.innerHTML =
         '\u26A0 <b>Plate scale too fine</b> (<span class="banner-scale">' + s + '″/px</span>) ' +
-        '— Star light spread over many pixels. Seeing measurements will be noise-dominated.';
-      warnEl.classList.add('visible');
-    } else if (scale < 0.15) {
-      // Only show fine-scale caution if we're not already showing coarse warning/caution
-      if (scale <= 0.8) {
-        var txt =
-          '\u26A0 <b>Fine sampling</b> (<span class="banner-scale">' + s + '″/px</span>) ' +
-          '— Narrow FOV, reduced per-pixel SNR. Consider shorter focal length for seeing work.';
-        if (cautionEl.classList.contains('visible')) {
-          // Both caution conditions — show fine as warning (top)
-          warnEl.innerHTML = txt;
-          warnEl.classList.add('visible');
-        } else {
-          cautionEl.innerHTML = txt;
-          cautionEl.classList.add('visible');
-        }
-      }
+        '— Star light spread over many pixels. Low per-pixel SNR — measurements may be noise-dominated.';
+      el.classList.add('visible');
+    } else if (scale < 0.15 && !cautionEl.classList.contains('visible')) {
+      cautionEl.innerHTML =
+        '\u26A0 <b>Fine sampling</b> (<span class="banner-scale">' + s + '″/px</span>) ' +
+        '— Narrow FOV, reduced per-pixel SNR. Consider shorter focal length for seeing work.';
+      cautionEl.classList.add('visible');
     }
   }
 
