@@ -540,7 +540,7 @@ HTML = r"""<!DOCTYPE html>
   #crosshair::before { width: 1px; height: 40px; top: -20px; left: 0; }
   #crosshair::after  { width: 40px; height: 1px; left: -20px; top: 0; }
   #controls {
-    width: 220px;
+    width: 280px;
     background: #111;
     border-left: 1px solid #333;
     padding: 16px 12px;
@@ -682,7 +682,7 @@ HTML = r"""<!DOCTYPE html>
   .star-chart {
     display: block; background: #0a0a0a;
     border: 1px solid #222; border-radius: 2px;
-    width: 196px;
+    width: 100%; box-sizing: border-box;
   }
   #btn-clear-star {
     width: 100%; margin-top: 8px; padding: 5px;
@@ -711,6 +711,46 @@ HTML = r"""<!DOCTYPE html>
   .seeing-quality.bad  { background: #2a0a0a; color: #a44; border: 1px solid #4a2a2a; }
   .seeing-detail { font-size: 11px; color: #888; margin: 2px 0; }
   .seeing-detail span { color: #ccc; }
+
+  /* ---- Image overlay HUD ---- */
+  #img-hud {
+    display: none;
+    position: absolute; bottom: 12px; left: 12px;
+    background: rgba(0, 0, 0, 0.72);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 12px;
+    color: #ccc;
+    pointer-events: none;
+    z-index: 5;
+    min-width: 130px;
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+  }
+  #img-hud.visible { display: block; }
+  .hud-row {
+    display: flex; justify-content: space-between; gap: 12px;
+    margin-bottom: 3px; white-space: nowrap;
+  }
+  .hud-row:last-child { margin-bottom: 0; }
+  .hud-lbl { color: #888; }
+  .hud-val { color: #7eb8f7; font-weight: bold; text-align: right; }
+  .hud-val.warn { color: #cc4; }
+  .hud-val.bad  { color: #e05050; }
+  .hud-seeing {
+    margin-top: 4px; padding-top: 5px;
+    border-top: 1px solid rgba(255,255,255,0.08);
+  }
+  .hud-seeing-val {
+    font-size: 16px; font-weight: bold; color: #7eb8f7;
+    text-align: center;
+  }
+  .hud-seeing-q {
+    font-size: 10px; text-align: center; margin-top: 2px;
+    padding: 1px 6px; border-radius: 3px; display: inline-block; width: 100%;
+    box-sizing: border-box;
+  }
 </style>
 </head>
 <body>
@@ -738,6 +778,24 @@ HTML = r"""<!DOCTYPE html>
     <img id="stream-img" src="/stream" alt="Camera stream" style="pointer-events:none;">
     <div id="crosshair"></div>
     <canvas id="roi-overlay"></canvas>
+    <div id="img-hud">
+      <div class="hud-row">
+        <span class="hud-lbl">FWHM</span>
+        <span class="hud-val" id="hud-fwhm">--</span>
+      </div>
+      <div class="hud-row">
+        <span class="hud-lbl">Peak</span>
+        <span class="hud-val" id="hud-peak">--</span>
+      </div>
+      <div class="hud-row">
+        <span class="hud-lbl">SNR</span>
+        <span class="hud-val" id="hud-snr">--</span>
+      </div>
+      <div class="hud-seeing" id="hud-seeing-wrap" style="display:none">
+        <div class="hud-seeing-val" id="hud-seeing">--</div>
+        <div class="hud-seeing-q" id="hud-seeing-q">--</div>
+      </div>
+    </div>
   </div>
 
   <div id="controls">
@@ -881,7 +939,7 @@ HTML = r"""<!DOCTYPE html>
 
     <div class="ctrl-group">
       <label>Histogram (ADU)</label>
-      <canvas id="hist-canvas" width="196" height="80"
+      <canvas id="hist-canvas" width="256" height="80"
               style="width:100%;background:#0a0a0a;border:1px solid #2a2a2a;border-radius:2px;display:block;"></canvas>
       <div style="margin-top:5px;font-size:11px;line-height:1.8;color:#888;">
         Min: <span class="stat-val" id="h-min">--</span>
@@ -1484,6 +1542,7 @@ HTML = r"""<!DOCTYPE html>
       body: JSON.stringify({ x: star.x, y: star.y }),
     });
     document.getElementById('selected-star-panel').style.display = 'block';
+    document.getElementById('img-hud').classList.add('visible');
     updateStarList();
     drawRoiOverlay();
     startProfilePolling();
@@ -1498,6 +1557,7 @@ HTML = r"""<!DOCTYPE html>
       body: JSON.stringify({ clear: true }),
     });
     document.getElementById('selected-star-panel').style.display = 'none';
+    document.getElementById('img-hud').classList.remove('visible');
     stopProfilePolling();
     stopSeeingPolling();
     updateStarList();
@@ -1508,11 +1568,19 @@ HTML = r"""<!DOCTYPE html>
   function updateStarStats(d) {
     if (!d.star_selected) return;
     if (d.star_fwhm !== null && d.star_fwhm !== undefined) {
-      document.getElementById('ss-fwhm').textContent = d.star_fwhm.toFixed(1);
-      document.getElementById('ss-peak').textContent = d.star_peak;
-      document.getElementById('ss-snr').textContent  = d.star_snr !== null
-                                                        ? d.star_snr.toFixed(1) : '--';
+      var fwhmStr = d.star_fwhm.toFixed(1);
+      var peakStr = String(d.star_peak);
+      var snrStr  = d.star_snr !== null ? d.star_snr.toFixed(1) : '--';
+      document.getElementById('ss-fwhm').textContent = fwhmStr;
+      document.getElementById('ss-peak').textContent = peakStr;
+      document.getElementById('ss-snr').textContent  = snrStr;
       document.getElementById('ss-sat').style.display = d.star_saturated ? 'inline' : 'none';
+      // Update image HUD
+      document.getElementById('hud-fwhm').textContent = fwhmStr + ' px';
+      var hudPeak = document.getElementById('hud-peak');
+      hudPeak.textContent = peakStr + ' / 255';
+      hudPeak.className = 'hud-val' + (d.star_peak > 240 ? ' bad' : d.star_peak > 220 ? ' warn' : '');
+      document.getElementById('hud-snr').textContent = snrStr;
       fwhmHistory.push(d.star_fwhm);
       if (fwhmHistory.length > 60) fwhmHistory.shift();
       drawTrend();
@@ -1545,7 +1613,7 @@ HTML = r"""<!DOCTYPE html>
   // ---- Radial profile chart ----
   function drawRadialProfile(profile, fwhm) {
     const canvas = document.getElementById('profile-canvas');
-    const W = canvas.offsetWidth || 196;
+    const W = canvas.offsetWidth || 256;
     canvas.width = W;
     const H = canvas.height;
     const ctx = canvas.getContext('2d');
@@ -1612,7 +1680,7 @@ HTML = r"""<!DOCTYPE html>
   function drawStarHistogram(histogram) {
     if (!histogram) return;
     const canvas = document.getElementById('hist-canvas');
-    const W = canvas.offsetWidth || 196;
+    const W = canvas.offsetWidth || 256;
     canvas.width = W;
     const H = canvas.height;
     const ctx = canvas.getContext('2d');
@@ -1653,7 +1721,7 @@ HTML = r"""<!DOCTYPE html>
   // ---- FWHM trend strip ----
   function drawTrend() {
     const canvas = document.getElementById('trend-canvas');
-    const W = canvas.offsetWidth || 196;
+    const W = canvas.offsetWidth || 256;
     canvas.width = W;
     const H = canvas.height;
     const ctx = canvas.getContext('2d');
@@ -1731,6 +1799,7 @@ HTML = r"""<!DOCTYPE html>
     if (seeingTimer) { clearInterval(seeingTimer); seeingTimer = null; }
     seeingHistory = [];
     document.getElementById('seeing-panel').style.display = 'none';
+    document.getElementById('hud-seeing-wrap').style.display = 'none';
   }
   function pollSeeing() {
     fetch('/api/seeing').then(r=>r.json()).then(d => {
@@ -1749,8 +1818,20 @@ HTML = r"""<!DOCTYPE html>
         d.valid_fraction !== null ? (d.valid_fraction * 100).toFixed(0) + '%' : '--';
       var qEl = document.getElementById('seeing-quality');
       qEl.textContent = d.quality || '--';
-      qEl.className = 'seeing-quality ' +
-        (d.quality === 'OK' ? 'ok' : (d.quality === 'HIGH_SCATTER' ? 'warn' : 'bad'));
+      var qClass = d.quality === 'OK' ? 'ok' : (d.quality === 'HIGH_SCATTER' ? 'warn' : 'bad');
+      qEl.className = 'seeing-quality ' + qClass;
+      // Update image HUD seeing
+      var hudSW = document.getElementById('hud-seeing-wrap');
+      if (d.seeing_arcsec !== null) {
+        hudSW.style.display = 'block';
+        document.getElementById('hud-seeing').textContent = d.seeing_arcsec.toFixed(2) + '"';
+        var hq = document.getElementById('hud-seeing-q');
+        hq.textContent = d.quality || '--';
+        var qColors = { ok: 'background:#0a2a0a;color:#4a4;border:1px solid #2a4a2a',
+                        warn: 'background:#2a2a0a;color:#aa4;border:1px solid #4a4a2a',
+                        bad: 'background:#2a0a0a;color:#a44;border:1px solid #4a2a2a' };
+        hq.style.cssText = qColors[qClass] || '';
+      }
       // Fetch history for chart
       fetch('/api/seeing/history').then(r=>r.json()).then(hist => {
         seeingHistory = hist.map(e => e.seeing_arcsec).filter(v => v !== null);
