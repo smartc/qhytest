@@ -751,6 +751,34 @@ HTML = r"""<!DOCTYPE html>
     padding: 1px 6px; border-radius: 3px; display: inline-block; width: 100%;
     box-sizing: border-box;
   }
+
+  /* ---- Optics limit banners (overlaid on image area) ---- */
+  .optics-banner {
+    display: none;
+    position: absolute; left: 0; right: 0;
+    padding: 6px 16px;
+    font-size: 12px; line-height: 1.4;
+    text-align: center;
+    z-index: 6;
+    pointer-events: none;
+  }
+  .optics-banner.visible { display: block; }
+  #optics-warn {
+    top: 0;
+    background: rgba(50, 10, 10, 0.88);
+    border-bottom: 1px solid #c03030;
+    color: #e88;
+  }
+  #optics-caution {
+    bottom: 0;
+    background: rgba(40, 36, 8, 0.88);
+    border-top: 1px solid #6a6a20;
+    color: #cc4;
+  }
+  .optics-banner b { color: inherit; }
+  .optics-banner .banner-scale {
+    font-weight: bold; font-size: 13px;
+  }
 </style>
 </head>
 <body>
@@ -778,6 +806,8 @@ HTML = r"""<!DOCTYPE html>
     <img id="stream-img" src="/stream" alt="Camera stream" style="pointer-events:none;">
     <div id="crosshair"></div>
     <canvas id="roi-overlay"></canvas>
+    <div id="optics-warn" class="optics-banner"></div>
+    <div id="optics-caution" class="optics-banner"></div>
     <div id="img-hud">
       <div class="hud-row">
         <span class="hud-lbl">FWHM</span>
@@ -1375,7 +1405,7 @@ HTML = r"""<!DOCTYPE html>
   function updateScaleHeader() {
     const scale = calcScale();
     const el    = document.getElementById('hdr-optics');
-    if (!scale) { el.style.display = 'none'; return; }
+    if (!scale) { el.style.display = 'none'; checkOpticsLimits(null); return; }
 
     // Current frame dimensions
     const fw = camState.roi_size > 0 ? camState.roi_size : camState.sensor_w;
@@ -1390,6 +1420,59 @@ HTML = r"""<!DOCTYPE html>
     document.getElementById('hdr-dims' ).textContent = `${fw}\u00d7${fh}`;
     document.getElementById('hdr-fov'  ).textContent = fovStr;
     el.style.display = 'flex';
+    checkOpticsLimits(scale);
+  }
+
+  // ---- Optics limits for seeing methodology ----
+  // Thresholds based on FWHM sampling: seeing ~2" needs FWHM > 2.5px
+  //   scale 0.8"/px → 2" seeing = 2.5px (marginal)
+  //   scale 1.5"/px → 2" seeing = 1.3px (unusable)
+  //   scale 0.15"/px → stars very spread, low SNR per pixel
+  //   scale 0.05"/px → extremely spread, noise-dominated
+  function checkOpticsLimits(scale) {
+    var warnEl    = document.getElementById('optics-warn');
+    var cautionEl = document.getElementById('optics-caution');
+    warnEl.classList.remove('visible');
+    cautionEl.classList.remove('visible');
+    if (!scale) return;
+
+    var s = scale.toFixed(2);
+
+    // ---- Coarse plate scale (undersampled PSF) ----
+    if (scale > 1.5) {
+      warnEl.innerHTML =
+        '\u26A0 <b>Plate scale too coarse</b> (<span class="banner-scale">' + s + '″/px</span>) ' +
+        '— Stars are under-sampled below ~3″ seeing. FWHM measurement unreliable at this scale.';
+      warnEl.classList.add('visible');
+    } else if (scale > 0.8) {
+      cautionEl.innerHTML =
+        '\u26A0 <b>Coarse sampling</b> (<span class="banner-scale">' + s + '″/px</span>) ' +
+        '— Under good seeing (<2″), stars approach Nyquist limit. Accuracy degrades with improving conditions.';
+      cautionEl.classList.add('visible');
+    }
+
+    // ---- Fine plate scale (oversampled, low SNR) ----
+    if (scale < 0.05) {
+      warnEl.innerHTML =
+        '\u26A0 <b>Plate scale too fine</b> (<span class="banner-scale">' + s + '″/px</span>) ' +
+        '— Star light spread over many pixels. Seeing measurements will be noise-dominated.';
+      warnEl.classList.add('visible');
+    } else if (scale < 0.15) {
+      // Only show fine-scale caution if we're not already showing coarse warning/caution
+      if (scale <= 0.8) {
+        var txt =
+          '\u26A0 <b>Fine sampling</b> (<span class="banner-scale">' + s + '″/px</span>) ' +
+          '— Narrow FOV, reduced per-pixel SNR. Consider shorter focal length for seeing work.';
+        if (cautionEl.classList.contains('visible')) {
+          // Both caution conditions — show fine as warning (top)
+          warnEl.innerHTML = txt;
+          warnEl.classList.add('visible');
+        } else {
+          cautionEl.innerHTML = txt;
+          cautionEl.classList.add('visible');
+        }
+      }
+    }
   }
 
   // ---- input validation ----
