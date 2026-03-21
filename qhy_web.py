@@ -824,6 +824,8 @@ HTML = r"""<!DOCTYPE html>
       <div class="ctrl-label">Star Analysis</div>
       <button id="btn-detect-stars">Detect Stars</button>
       <div id="star-list"></div>
+      <div id="star-warn" style="display:none;font-size:11px;padding:4px 6px;margin-top:4px;
+           background:#2a2a0a;border:1px solid #4a4a2a;color:#cc4;border-radius:3px;"></div>
 
       <div id="selected-star-panel" style="display:none">
         <div class="ss-row">
@@ -1453,10 +1455,22 @@ HTML = r"""<!DOCTYPE html>
         detectedStars = d.stars || [];
         updateStarList();
         drawRoiOverlay();
-        // Auto-select best candidate: highest SNR that isn't saturated
+        // Auto-select best candidate: highest SNR under safe threshold
+        var warnEl = document.getElementById('star-warn');
+        warnEl.style.display = 'none';
         if (!selectedStar && detectedStars.length > 0) {
-          var best = detectedStars.find(s => s.peak <= 240);
-          if (best) selectStar(best);
+          var best = detectedStars.find(s => s.peak <= 220);
+          if (best) {
+            selectStar(best);
+          } else {
+            // All stars above safe threshold — pick the lowest peak
+            var sorted = detectedStars.slice().sort((a, b) => a.peak - b.peak);
+            selectStar(sorted[0]);
+            warnEl.textContent = sorted[0].peak > 240
+              ? '\u26A0 All stars saturated (peak ' + sorted[0].peak + '). Reduce exposure or gain.'
+              : '\u26A0 Best star near saturation (peak ' + sorted[0].peak + '/255). Consider reducing exposure.';
+            warnEl.style.display = 'block';
+          }
         }
       });
   });
