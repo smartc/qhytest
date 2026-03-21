@@ -1453,6 +1453,11 @@ HTML = r"""<!DOCTYPE html>
         detectedStars = d.stars || [];
         updateStarList();
         drawRoiOverlay();
+        // Auto-select best candidate: highest SNR that isn't saturated
+        if (!selectedStar && detectedStars.length > 0) {
+          var best = detectedStars.find(s => s.peak <= 240);
+          if (best) selectStar(best);
+        }
       });
   });
 
