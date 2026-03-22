@@ -407,8 +407,8 @@ class CameraWorker:
                                 # Feed frame to seeing calculator
                                 fr = seeing_calculator.FrameResult(
                                     timestamp=time.perf_counter(),
-                                    x_centroid=selected['x'],
-                                    y_centroid=selected['y'],
+                                    x_centroid=meas['x'],
+                                    y_centroid=meas['y'],
                                     fwhm_px=meas.get('fwhm'),
                                     peak_adu=int(meas.get('peak', 0)),
                                     valid=(meas.get('peak', 0) <= 240

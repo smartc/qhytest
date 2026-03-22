@@ -101,6 +101,8 @@ class SeeingCalculator:
 
         if method == "FWHM":
             seeing_arcsec = fwhm_median_arcsec
+        elif method == "BOTH" and seeing_arcsec is None:
+            seeing_arcsec = fwhm_median_arcsec
 
         method_used = method
         quality = self._quality_flag(
@@ -141,6 +143,10 @@ class SeeingCalculator:
 
         # Centroid variance (mean of x and y variances)
         sigma2 = (np.var(x_detrended) + np.var(y_detrended)) / 2.0
+
+        # Guard: if variance is effectively zero, seeing is indeterminate
+        if sigma2 < 1e-20:
+            return (None, None, sigma2)
 
         # Tokovinin (2002) single circular aperture formula
         aperture_m = self.config.aperture_mm / 1000.0

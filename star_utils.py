@@ -145,6 +145,7 @@ def measure_star(frame, cx, cy, aperture=None):
     aperture defaults to max(10, min(25, fwhm * 2.5)) computed internally.
 
     Returns dict:
+        x, y              – refined sub-pixel centroid (flux-weighted)
         fwhm              – FWHM in pixels
         peak              – peak ADU
         background        – local sky background ADU
@@ -158,8 +159,19 @@ def measure_star(frame, cx, cy, aperture=None):
     h, w = img.shape
     cx, cy = float(cx), float(cy)
 
-    # Quick FWHM estimate for adaptive aperture
+    # Flux-weighted centroid refinement (8-px aperture around input position)
+    _ap = 8
+    _y0, _y1 = max(0, int(cy) - _ap), min(h, int(cy) + _ap + 1)
+    _x0, _x1 = max(0, int(cx) - _ap), min(w, int(cx) + _ap + 1)
     bg_rough = float(np.median(img))
+    _sub = np.maximum(img[_y0:_y1, _x0:_x1] - bg_rough, 0)
+    _total = _sub.sum()
+    if _total > 0:
+        _sy, _sx = np.mgrid[_y0:_y1, _x0:_x1]
+        cx = float((_sx * _sub).sum() / _total)
+        cy = float((_sy * _sub).sum() / _total)
+
+    # Quick FWHM estimate for adaptive aperture
     fwhm = _fwhm_from_radial(img, cx, cy, bg_rough)
 
     if aperture is None:
@@ -221,6 +233,8 @@ def measure_star(frame, cx, cy, aperture=None):
     }
 
     return {
+        'x':               round(cx, 2),
+        'y':               round(cy, 2),
         'fwhm':            round(fwhm, 2),
         'peak':            peak,
         'background':      round(bg, 1),
