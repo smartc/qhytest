@@ -226,6 +226,38 @@ class CameraWorker:
         with self._lock:
             return dict(self._star_measurement) if self._star_measurement else None
 
+    def update_optics(self, focal_length_mm, pixel_size_um,
+                      aperture_mm=None):
+        """Rebuild the seeing calculator with new optics parameters."""
+        # Auto-select method: FWHM is only useful when the Airy disk
+        # (or at least ~2 px FWHM) is resolved.  At coarse plate scales
+        # the measured FWHM is pixel-limited and meaningless.
+        plate_scale = (pixel_size_um / 1e6) / (focal_length_mm / 1000.0)
+        plate_scale_arcsec = plate_scale * 206265.0
+        # Airy FWHM ≈ 1.02 * lambda/D * 206265 arcsec
+        if aperture_mm:
+            airy_arcsec = 1.02 * 5.5e-7 / (aperture_mm / 1000.0) * 206265.0
+            airy_px = airy_arcsec / plate_scale_arcsec
+        else:
+            airy_px = 0.0
+        # If Airy disk < 2 px, FWHM can't resolve seeing — use CENTROID
+        method = "CENTROID" if airy_px < 2.0 else "BOTH"
+        with self._lock:
+            self._seeing_calc = seeing_calculator.SeeingCalculator(
+                seeing_calculator.SeeingConfig(
+                    focal_length_mm=focal_length_mm,
+                    aperture_mm=aperture_mm or 30.0,
+                    pixel_size_um=pixel_size_um,
+                    method=method,
+                    window_frames=200,
+                )
+            )
+        print(f"Optics updated: FL={focal_length_mm}mm "
+              f"aperture={aperture_mm}mm "
+              f"pixel={pixel_size_um}µm "
+              f"plate_scale={plate_scale_arcsec:.2f}\"/px "
+              f"method={method}")
+
     def get_stats(self):
         with self._lock:
             meas = self._star_measurement
@@ -909,6 +941,13 @@ HTML = r"""<!DOCTYPE html>
         </div>
       </div>
       <div class="optics-row">
+        <label>Aperture</label>
+        <div class="optics-inp-wrap">
+          <input type="number" id="inp-aperture" min="5" max="5000" step="1" placeholder="mm">
+          <span class="optics-unit">mm</span>
+        </div>
+      </div>
+      <div class="optics-row">
         <label>Pixel size <span class="optics-src" id="px-src"></span></label>
         <div class="optics-inp-wrap">
           <input type="number" id="inp-pixel" min="0.5" max="30" step="0.01" placeholder="µm">
@@ -1381,18 +1420,22 @@ HTML = r"""<!DOCTYPE html>
   // Optics — pixel scale and field of view
   // =========================================================
 
-  const inpFocal = document.getElementById('inp-focal');
-  const inpPixel = document.getElementById('inp-pixel');
+  const inpFocal    = document.getElementById('inp-focal');
+  const inpAperture = document.getElementById('inp-aperture');
+  const inpPixel    = document.getElementById('inp-pixel');
 
   // Working values (validated); null = not yet set / invalid
-  let optFocalMm = null;
-  let optPixelUm = null;
+  let optFocalMm    = null;
+  let optApertureMm = null;
+  let optPixelUm    = null;
   let pixelFromCamera = false;
 
   // ---- localStorage persistence ----
   (function loadOpticsSaved() {
     const fl = parseFloat(localStorage.getItem('qhy_focal_mm'));
     if (fl > 0) { inpFocal.value = fl; optFocalMm = fl; }
+    const ap = parseFloat(localStorage.getItem('qhy_aperture_mm'));
+    if (ap > 0) { inpAperture.value = ap; optApertureMm = ap; }
     const px = parseFloat(localStorage.getItem('qhy_pixel_um'));
     if (px > 0) { inpPixel.value = px; optPixelUm = px; }
   })();
@@ -1440,6 +1483,20 @@ HTML = r"""<!DOCTYPE html>
     return ok ? v : null;
   }
 
+  function sendOptics() {
+    if (!optFocalMm || !optPixelUm) return;
+    const body = {
+      focal_length_mm: optFocalMm,
+      pixel_size_um:   optPixelUm,
+    };
+    if (optApertureMm) body.aperture_mm = optApertureMm;
+    fetch('/api/optics', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+  }
+
   inpFocal.addEventListener('input', () => {
     const v = validateOpticInput(inpFocal, 10, 50000);
     if (v !== null) {
@@ -1449,6 +1506,18 @@ HTML = r"""<!DOCTYPE html>
       optFocalMm = null;
     }
     updateScaleHeader();
+    sendOptics();
+  });
+
+  inpAperture.addEventListener('input', () => {
+    const v = validateOpticInput(inpAperture, 5, 5000);
+    if (v !== null) {
+      optApertureMm = v;
+      localStorage.setItem('qhy_aperture_mm', v);
+    } else {
+      optApertureMm = null;
+    }
+    sendOptics();
   });
 
   inpPixel.addEventListener('input', () => {
@@ -1460,6 +1529,7 @@ HTML = r"""<!DOCTYPE html>
       optPixelUm = null;
     }
     updateScaleHeader();
+    sendOptics();
   });
 
   // Called from pollStats when the camera reports its pixel size
@@ -1473,9 +1543,13 @@ HTML = r"""<!DOCTYPE html>
       optPixelUm = px_um;
       localStorage.setItem('qhy_pixel_um', px_um);
       updateScaleHeader();
+      sendOptics();
     }
     document.getElementById('px-src').textContent = '(camera)';
   }
+
+  // Send optics to backend on initial page load
+  sendOptics();
 
   // =========================================================
   // Star Analysis
@@ -1942,6 +2016,18 @@ def stream():
 @app.route('/api/histogram')
 def histogram():
     return jsonify(camera.get_histogram())
+
+
+@app.route('/api/optics', methods=['POST'])
+def api_optics():
+    data = request.get_json(force=True)
+    fl = data.get('focal_length_mm')
+    px = data.get('pixel_size_um')
+    ap = data.get('aperture_mm')
+    if fl and px:
+        camera.update_optics(float(fl), float(px),
+                             float(ap) if ap else None)
+    return jsonify({'ok': True})
 
 
 @app.route('/api/stars')

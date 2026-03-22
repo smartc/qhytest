@@ -12,17 +12,38 @@ import numpy as np
 # Star detection
 # ---------------------------------------------------------------------------
 
+def _remove_row_bias(img):
+    """Subtract per-row median to remove horizontal banding artifacts."""
+    row_med = np.median(img, axis=1, keepdims=True)
+    return img - row_med
+
+
+def _smooth_3x3(img):
+    """Simple 3x3 box-car smooth (matched filter for point sources)."""
+    h, w = img.shape
+    out = np.zeros_like(img)
+    out[1:-1, 1:-1] = (
+        img[0:-2, 0:-2] + img[0:-2, 1:-1] + img[0:-2, 2:]
+        + img[1:-1, 0:-2] + img[1:-1, 1:-1] + img[1:-1, 2:]
+        + img[2:,   0:-2] + img[2:,   1:-1] + img[2:,   2:]
+    ) / 9.0
+    return out
+
+
 def detect_stars(frame, threshold_sigma=5.0, min_separation=8, max_stars=20):
     """
     Detect point sources in a 2D uint8 array.
 
     Algorithm:
-      1. Robust background + noise from sigma-clipped median/std.
-      2. Find all pixels above threshold, sorted brightest-first.
-      3. Greedy: take each unmasked peak as a star centre; mask a
+      1. Remove horizontal banding via per-row median subtraction.
+      2. Apply 3x3 box smooth to boost SNR of point sources.
+      3. Robust background + noise from sigma-clipped median/std.
+      4. Find all pixels above threshold, sorted brightest-first.
+      5. Greedy: take each unmasked peak as a star centre; mask a
          min_separation-radius region so nearby pixels are skipped.
-      4. Flux-weighted centroid refinement within an 8-px aperture.
-      5. FWHM estimated from the radial intensity profile.
+      6. Flux-weighted centroid refinement within an 8-px aperture
+         (on destriped image).
+      7. FWHM estimated from the radial intensity profile.
 
     Returns list of dicts (sorted by SNR desc):
         x, y          – sub-pixel centroid in frame pixel coordinates
@@ -33,23 +54,37 @@ def detect_stars(frame, threshold_sigma=5.0, min_separation=8, max_stars=20):
     img = frame.astype(np.float32)
     h, w = img.shape
 
-    # Robust background + noise
-    bg = float(np.median(img))
-    rough_sigma = float(img.std())
-    bg_pix = img.ravel()[np.abs(img.ravel() - bg) < 3.0 * rough_sigma]
-    noise = float(bg_pix.std()) if len(bg_pix) > 50 else rough_sigma
-    noise = max(noise, 1.0)
+    # Remove horizontal banding and smooth for detection
+    destriped = _remove_row_bias(img)
+    smoothed = _smooth_3x3(destriped)
 
-    threshold = bg + threshold_sigma * noise
+    # Robust background + noise on the smoothed destriped image
+    bg_s = float(np.median(smoothed))
+    rough_sigma = float(smoothed.std())
+    bg_pix = smoothed.ravel()[
+        np.abs(smoothed.ravel() - bg_s) < 3.0 * rough_sigma]
+    noise_s = float(bg_pix.std()) if len(bg_pix) > 50 else rough_sigma
+    noise_s = max(noise_s, 0.5)
 
-    ys, xs = np.where(img > threshold)
+    threshold = bg_s + threshold_sigma * noise_s
+
+    ys, xs = np.where(smoothed > threshold)
     if len(xs) == 0:
         return []
 
-    # Sort by brightness descending
-    vals = img[ys, xs]
+    # Sort by brightness descending (in smoothed image)
+    vals = smoothed[ys, xs]
     order = np.argsort(-vals)
     ys, xs = ys[order], xs[order]
+
+    # Also compute background/noise on the destriped (unsmoothed) image
+    # for centroid refinement and reported SNR
+    bg_d = float(np.median(destriped))
+    rough_d = float(destriped.std())
+    bg_pix_d = destriped.ravel()[
+        np.abs(destriped.ravel() - bg_d) < 3.0 * rough_d]
+    noise_d = float(bg_pix_d.std()) if len(bg_pix_d) > 50 else rough_d
+    noise_d = max(noise_d, 1.0)
 
     used = np.zeros((h, w), dtype=bool)
     stars = []
@@ -63,11 +98,11 @@ def detect_stars(frame, threshold_sigma=5.0, min_separation=8, max_stars=20):
         used[max(0, cy_i - r):min(h, cy_i + r + 1),
              max(0, cx_i - r):min(w, cx_i + r + 1)] = True
 
-        # Flux-weighted centroid
+        # Flux-weighted centroid on destriped image
         ap = 8
         y0, y1 = max(0, cy_i - ap), min(h, cy_i + ap + 1)
         x0, x1 = max(0, cx_i - ap), min(w, cx_i + ap + 1)
-        sub = np.maximum(img[y0:y1, x0:x1] - bg, 0)
+        sub = np.maximum(destriped[y0:y1, x0:x1] - bg_d, 0)
         total = sub.sum()
         if total <= 0:
             continue
@@ -76,8 +111,8 @@ def detect_stars(frame, threshold_sigma=5.0, min_separation=8, max_stars=20):
         cy_f = float((sy_g * sub).sum() / total)
 
         peak = float(img[cy_i, cx_i])
-        snr = (peak - bg) / noise
-        fwhm = _fwhm_from_radial(img, cx_f, cy_f, bg)
+        snr = (peak - float(np.median(img))) / noise_d
+        fwhm = _fwhm_from_radial(destriped, cx_f, cy_f, bg_d)
 
         stars.append({
             'x':    round(cx_f, 1),
