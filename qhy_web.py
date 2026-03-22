@@ -1822,18 +1822,23 @@ HTML = r"""<!DOCTYPE html>
       ctx.fillRect(x, y, Math.max(bw - 1, 1), barH);
     });
 
-    // Saturation zone background tint
+    // Saturation zone — only highlight if pixels are actually there
     const satX = padL + (SAT_THRESHOLD / 256) * pw;
-    ctx.fillStyle = 'rgba(200,40,40,0.06)';
-    ctx.fillRect(satX, padT, W - padR - satX, ph);
+    const hasSatPixels = bins.some((bin, i) => bin >= SAT_THRESHOLD && counts[i] > 0);
+    if (hasSatPixels) {
+      ctx.fillStyle = 'rgba(200,40,40,0.06)';
+      ctx.fillRect(satX, padT, W - padR - satX, ph);
+    }
 
     // Axis labels
     ctx.fillStyle = '#444';
     ctx.font = '9px monospace';
     ctx.fillText('0', padL - 3, H - 2);
     ctx.fillText('255', W - padR - 18, H - 2);
-    ctx.fillStyle = 'rgba(200,60,60,0.6)';
-    ctx.fillText('SAT', satX + 2, padT + 9);
+    if (hasSatPixels) {
+      ctx.fillStyle = 'rgba(200,60,60,0.6)';
+      ctx.fillText('SAT', satX + 2, padT + 9);
+    }
   }
 
   // ---- FWHM trend strip ----
