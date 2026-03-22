@@ -36,6 +36,7 @@ class FrameResult:
     y_centroid: float               # pixels
     fwhm_px: Optional[float]        # pixels, None if not available
     peak_adu: int                   # peak pixel value
+    snr: float                      # measured (peak - bg) / noise
     valid: bool                     # False if saturated or detection failed
 
 
@@ -147,17 +148,14 @@ class SeeingCalculator:
         # Subtract noise-induced centroid jitter bias.
         # For a Gaussian PSF, noise-induced centroid error per axis is
         # approximately sigma_psf / SNR (in pixels), where sigma_psf =
-        # FWHM / 2.35.  Convert to radians and subtract the variance.
+        # FWHM / 2.35.  Use the actual measured SNR from each frame.
         fwhm_vals = [f.fwhm_px for f in valid_frames if f.fwhm_px]
-        snr_vals = [f.peak_adu for f in valid_frames if f.peak_adu > 0]
+        snr_vals = [f.snr for f in valid_frames if f.snr > 0]
         if fwhm_vals and snr_vals:
             med_fwhm_px = float(np.median(fwhm_vals))
-            # Estimate per-frame SNR from peak ADU / background noise.
-            # Use the peak values as a rough SNR proxy via sqrt(peak).
-            med_peak = float(np.median(snr_vals))
-            est_snr = max(math.sqrt(med_peak), 1.0)
+            med_snr = max(float(np.median(snr_vals)), 1.0)
             sigma_psf_px = med_fwhm_px / 2.35
-            noise_var_px = (sigma_psf_px / est_snr) ** 2
+            noise_var_px = (sigma_psf_px / med_snr) ** 2
             noise_var_rad = noise_var_px * self.plate_scale_rad_px ** 2
             sigma2 = max(sigma2_measured - noise_var_rad, 1e-20)
         else:
@@ -317,6 +315,7 @@ if __name__ == '__main__':
             y_centroid=cy,
             fwhm_px=fwhm,
             peak_adu=peak,
+            snr=15.0,
             valid=True,
         )
 

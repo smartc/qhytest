@@ -133,6 +133,7 @@ class CameraWorker:
         self._fps = 0.0
         self._error = None
         self._auto_stretch = True
+        self._destripe = True
         self._histogram = None   # list of 256 counts
         self._hist_stats = None  # (min_adu, median_adu, max_adu)
         self._latest_raw = None  # latest raw numpy array (for on-demand detection)
@@ -170,10 +171,13 @@ class CameraWorker:
         return x, y, w, h
 
     def set_params(self, exposure_ms=None, gain=None, auto_stretch=None,
+                   destripe=None,
                    roi_size=None, roi_cx=None, roi_cy=None):
         with self._lock:
             if auto_stretch is not None:
                 self._auto_stretch = auto_stretch
+            if destripe is not None:
+                self._destripe = destripe
             # ROI change invalidates any selected star (coords are frame-relative)
             if roi_size is not None or roi_cx is not None or roi_cy is not None:
                 self._selected_star = None
@@ -413,29 +417,40 @@ class CameraWorker:
 
                     with self._lock:
                         auto_stretch = self._auto_stretch
+                        do_destripe = self._destripe
 
-                    jpeg = self._encode_jpeg(arr, auto_stretch)
+                    # Remove horizontal banding (per-row median)
+                    if do_destripe:
+                        row_med = np.median(arr, axis=1, keepdims=True)
+                        global_med = np.median(arr)
+                        arr_clean = np.clip(
+                            arr.astype(np.float32) - row_med + global_med,
+                            0, 255).astype(np.uint8)
+                    else:
+                        arr_clean = arr
+
+                    jpeg = self._encode_jpeg(arr_clean, auto_stretch)
 
                     # Compute histogram on raw 8-bit pixel values
-                    hist, _ = np.histogram(arr, bins=256, range=(0, 255))
+                    hist, _ = np.histogram(arr_clean, bins=256, range=(0, 255))
                     hist_stats = (
-                        int(arr.min()),
-                        int(np.median(arr)),
-                        int(arr.max()),
+                        int(arr_clean.min()),
+                        int(np.median(arr_clean)),
+                        int(arr_clean.max()),
                     )
 
                     with self._lock:
                         self._latest_jpeg = jpeg
-                        self._latest_raw  = arr
+                        self._latest_raw  = arr_clean
                         self._histogram   = hist.tolist()
                         self._hist_stats  = hist_stats
                         selected = self._selected_star
 
-                    # Measure selected star on every captured frame
+                    # Measure selected star on destriped frame
                     if selected is not None:
                         try:
                             meas = star_utils.measure_star(
-                                arr, selected['x'], selected['y'])
+                                arr_clean, selected['x'], selected['y'])
                             if meas is not None:
                                 with self._lock:
                                     self._star_measurement = meas
@@ -443,13 +458,16 @@ class CameraWorker:
                                     self._selected_star = {
                                         'x': meas['x'], 'y': meas['y']}
                                 # Feed frame to seeing calculator
+                                star_snr = meas.get('snr', 0)
                                 fr = seeing_calculator.FrameResult(
                                     timestamp=time.perf_counter(),
                                     x_centroid=meas['x'],
                                     y_centroid=meas['y'],
                                     fwhm_px=meas.get('fwhm'),
                                     peak_adu=int(meas.get('peak', 0)),
+                                    snr=float(star_snr),
                                     valid=(meas.get('peak', 0) <= 240
+                                           and star_snr >= 5.0
                                            and meas.get('fwhm') is not None),
                                 )
                                 self._seeing_calc.add_frame(fr)
@@ -896,6 +914,10 @@ HTML = r"""<!DOCTYPE html>
         <input type="checkbox" id="chk-stretch" checked>
         <span>Auto-stretch</span>
       </label>
+      <label class="toggle-row" style="margin-top:6px">
+        <input type="checkbox" id="chk-destripe" checked>
+        <span>Destripe</span>
+      </label>
       <div style="margin-top:10px">
       <label class="toggle-row">
         <input type="checkbox" id="chk-crosshair">
@@ -1056,6 +1078,8 @@ HTML = r"""<!DOCTYPE html>
     sendTimer = setTimeout(sendParams, 300);
   }
 
+  const chkDestripe = document.getElementById('chk-destripe');
+
   function sendParams() {
     fetch('/api/params', {
       method: 'POST',
@@ -1064,6 +1088,7 @@ HTML = r"""<!DOCTYPE html>
         exposure_ms: parseInt(expNum.value),
         gain: parseInt(gainNum.value),
         auto_stretch: chkStretch.checked,
+        destripe: chkDestripe.checked,
       })
     });
   }
@@ -1083,6 +1108,7 @@ HTML = r"""<!DOCTYPE html>
   });
 
   chkStretch.addEventListener('change', sendParams);
+  chkDestripe.addEventListener('change', sendParams);
 
   chkCross.addEventListener('change', () => {
     crosshair.style.display = chkCross.checked ? 'block' : 'none';
@@ -2072,6 +2098,7 @@ def params():
             exposure_ms=data.get('exposure_ms'),
             gain=data.get('gain'),
             auto_stretch=data.get('auto_stretch'),
+            destripe=data.get('destripe'),
             roi_size=data.get('roi_size'),
             roi_cx=data.get('roi_cx'),
             roi_cy=data.get('roi_cy'),
