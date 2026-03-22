@@ -332,6 +332,7 @@ class CameraWorker:
             print(f"Camera ready: {sensor_w}x{sensor_h}, ROI={roi_label}, "
                   f"exposure={self.exposure_ms}ms, gain={self.gain}")
 
+            roi_size = self.roi_size
             fps_frames = 0
             fps_t = time.time()
 
@@ -404,6 +405,9 @@ class CameraWorker:
                             if meas is not None:
                                 with self._lock:
                                     self._star_measurement = meas
+                                    # Update selected position to refined centroid
+                                    self._selected_star = {
+                                        'x': meas['x'], 'y': meas['y']}
                                 # Feed frame to seeing calculator
                                 fr = seeing_calculator.FrameResult(
                                     timestamp=time.perf_counter(),
@@ -415,6 +419,39 @@ class CameraWorker:
                                            and meas.get('fwhm') is not None),
                                 )
                                 self._seeing_calc.add_frame(fr)
+
+                                # Auto-reposition ROI if star drifts
+                                # too far from center (sub-ROI mode only)
+                                if roi_size > 0:
+                                    half = roi_size / 2.0
+                                    dx = meas['x'] - half
+                                    dy = meas['y'] - half
+                                    drift = max(abs(dx), abs(dy))
+                                    if drift > half * 0.5:
+                                        # Star sensor coords
+                                        star_sx = rx + meas['x']
+                                        star_sy = ry + meas['y']
+                                        new_cx = int(round(star_sx))
+                                        new_cy = int(round(star_sy))
+                                        sdk.StopQHYCCDLive(handle)
+                                        with self._lock:
+                                            self.roi_cx = new_cx
+                                            self.roi_cy = new_cy
+                                        rx, ry, rw, rh = self._roi_xywh(
+                                            roi_size, new_cx, new_cy,
+                                            sensor_w, sensor_h)
+                                        sdk.SetQHYCCDResolution(
+                                            handle, rx, ry, rw, rh)
+                                        sdk.BeginQHYCCDLive(handle)
+                                        # Update selected star to new
+                                        # ROI-frame coords (near center)
+                                        new_fx = star_sx - rx
+                                        new_fy = star_sy - ry
+                                        with self._lock:
+                                            self._selected_star = {
+                                                'x': new_fx, 'y': new_fy}
+                                        print(f"ROI tracking: recentered "
+                                              f"to ({new_cx},{new_cy})")
                         except Exception:
                             pass
 
