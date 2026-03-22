@@ -242,6 +242,8 @@ class CameraWorker:
                 'error': self._error,
                 'pixel_size_um':  self.pixel_size_um,
                 'star_selected':  self._selected_star is not None,
+                'star_x':         self._selected_star['x'] if self._selected_star else None,
+                'star_y':         self._selected_star['y'] if self._selected_star else None,
                 'star_fwhm':      meas['fwhm']            if meas else None,
                 'star_peak':      meas['peak']            if meas else None,
                 'star_snr':       meas['snr']             if meas else None,
@@ -427,7 +429,7 @@ class CameraWorker:
                                     dx = meas['x'] - half
                                     dy = meas['y'] - half
                                     drift = max(abs(dx), abs(dy))
-                                    if drift > half * 0.5:
+                                    if drift > half * 0.25:
                                         # Star sensor coords
                                         star_sx = rx + meas['x']
                                         star_sy = ry + meas['y']
@@ -1604,6 +1606,11 @@ HTML = r"""<!DOCTYPE html>
   // ---- live stats from pollStats ----
   function updateStarStats(d) {
     if (!d.star_selected) return;
+    // Track refined centroid position from server
+    if (selectedStar && d.star_x != null && d.star_y != null) {
+      selectedStar.x = d.star_x;
+      selectedStar.y = d.star_y;
+    }
     if (d.star_fwhm !== null && d.star_fwhm !== undefined) {
       var fwhmStr = d.star_fwhm.toFixed(1);
       var peakStr = String(d.star_peak);

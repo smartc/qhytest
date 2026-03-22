@@ -142,7 +142,26 @@ class SeeingCalculator:
         y_detrended = y_rad - np.polyval(y_coeffs, t)
 
         # Centroid variance (mean of x and y variances)
-        sigma2 = (np.var(x_detrended) + np.var(y_detrended)) / 2.0
+        sigma2_measured = (np.var(x_detrended) + np.var(y_detrended)) / 2.0
+
+        # Subtract noise-induced centroid jitter bias.
+        # For a Gaussian PSF, noise-induced centroid error per axis is
+        # approximately sigma_psf / SNR (in pixels), where sigma_psf =
+        # FWHM / 2.35.  Convert to radians and subtract the variance.
+        fwhm_vals = [f.fwhm_px for f in valid_frames if f.fwhm_px]
+        snr_vals = [f.peak_adu for f in valid_frames if f.peak_adu > 0]
+        if fwhm_vals and snr_vals:
+            med_fwhm_px = float(np.median(fwhm_vals))
+            # Estimate per-frame SNR from peak ADU / background noise.
+            # Use the peak values as a rough SNR proxy via sqrt(peak).
+            med_peak = float(np.median(snr_vals))
+            est_snr = max(math.sqrt(med_peak), 1.0)
+            sigma_psf_px = med_fwhm_px / 2.35
+            noise_var_px = (sigma_psf_px / est_snr) ** 2
+            noise_var_rad = noise_var_px * self.plate_scale_rad_px ** 2
+            sigma2 = max(sigma2_measured - noise_var_rad, 1e-20)
+        else:
+            sigma2 = sigma2_measured
 
         # Guard: if variance is effectively zero, seeing is indeterminate
         if sigma2 < 1e-20:
@@ -170,8 +189,20 @@ class SeeingCalculator:
         if len(fwhm_vals) < 5:
             return (None, None)
 
+        # At coarse plate scales the measured FWHM is dominated by the
+        # pixel/optics PSF rather than atmosphere.  Subtract a minimum
+        # instrumental FWHM floor (~1.3 px Nyquist limit) in quadrature.
+        fwhm_floor_px = 1.3
+        fwhm_atm_px = np.sqrt(np.maximum(
+            fwhm_vals ** 2 - fwhm_floor_px ** 2, 0.0))
+
         # Convert to arcsec
-        fwhm_arcsec = fwhm_vals * self.plate_scale_arcsec_px
+        fwhm_arcsec = fwhm_atm_px * self.plate_scale_arcsec_px
+
+        # Filter out frames where the atmospheric contribution was zero
+        fwhm_arcsec = fwhm_arcsec[fwhm_arcsec > 0]
+        if len(fwhm_arcsec) < 5:
+            return (None, None)
 
         # Reject outliers beyond 3 sigma
         median = np.median(fwhm_arcsec)
