@@ -37,6 +37,7 @@ class FrameResult:
     fwhm_px: Optional[float]        # pixels, None if not available
     peak_adu: int                   # peak pixel value
     snr: float                      # measured (peak - bg) / noise
+    exposure_ms: float              # exposure time in milliseconds
     valid: bool                     # False if saturated or detection failed
 
 
@@ -52,6 +53,7 @@ class SeeingEstimate:
     valid_fraction: float
     method_used: str
     quality: str                    # "OK", "LOW_VALID_FRACTION", etc.
+    exposure_warning: Optional[str] = None  # warning if exposure too long
 
 
 class SeeingCalculator:
@@ -109,6 +111,41 @@ class SeeingCalculator:
         quality = self._quality_flag(
             all_frames, valid_fraction, fwhm_std_arcsec, seeing_arcsec)
 
+        # Exposure-time correction for centroid method.
+        # Long exposures average over multiple atmospheric coherence
+        # times, reducing measured centroid variance.  The coherence
+        # time τ₀ ≈ 0.31 * r₀ / v_wind.  With a typical wind speed
+        # of ~5 m/s, we can estimate τ₀ from r₀ and correct the
+        # variance by the factor N_eff = max(1, T_exp / τ₀).
+        exposure_warning = None
+        exp_vals = [f.exposure_ms for f in valid_frames]
+        median_exp_ms = float(np.median(exp_vals)) if exp_vals else 0
+        if (method_used in ("CENTROID", "BOTH")
+                and seeing_arcsec is not None and r0_m is not None
+                and median_exp_ms > 0):
+            v_wind = 5.0  # assumed wind speed, m/s
+            tau0_ms = 0.31 * r0_m / v_wind * 1000.0  # coherence time in ms
+            n_eff = max(1.0, median_exp_ms / tau0_ms)
+            if n_eff > 1.2:
+                # Measured variance was reduced by factor n_eff;
+                # correct by multiplying variance back up
+                if sigma2_rad2 is not None and sigma2_rad2 > 0:
+                    corrected_sigma2 = sigma2_rad2 * n_eff
+                    # Recompute r0 and seeing from corrected variance
+                    aperture_m = self.config.aperture_mm / 1000.0
+                    wavelength = self.config.wavelength_m
+                    r0_m = aperture_m * (
+                        0.179 * wavelength**2
+                        / (corrected_sigma2 * aperture_m**2)
+                    ) ** (3.0 / 5.0)
+                    seeing_arcsec = 0.98 * wavelength / r0_m * 206265.0
+                    sigma2_rad2 = corrected_sigma2
+            if median_exp_ms > 20:
+                exposure_warning = (
+                    f"Exp {median_exp_ms:.0f}ms > 20ms "
+                    f"(~{n_eff:.1f}x avg); corrected"
+                )
+
         estimate = SeeingEstimate(
             timestamp=time.time(),
             seeing_arcsec=seeing_arcsec,
@@ -120,6 +157,7 @@ class SeeingCalculator:
             valid_fraction=valid_fraction,
             method_used=method_used,
             quality=quality,
+            exposure_warning=exposure_warning,
         )
 
         self._history.append(estimate)
@@ -256,6 +294,7 @@ class SeeingCalculator:
             'valid_fraction': _round(estimate.valid_fraction),
             'method_used': estimate.method_used,
             'quality': estimate.quality,
+            'exposure_warning': estimate.exposure_warning,
         }
 
 
@@ -316,6 +355,7 @@ if __name__ == '__main__':
             fwhm_px=fwhm,
             peak_adu=peak,
             snr=15.0,
+            exposure_ms=1.0,  # synthetic; each sample is independent
             valid=True,
         )
 

@@ -466,6 +466,7 @@ class CameraWorker:
                                     fwhm_px=meas.get('fwhm'),
                                     peak_adu=int(meas.get('peak', 0)),
                                     snr=float(star_snr),
+                                    exposure_ms=float(exp_ms),
                                     valid=(meas.get('peak', 0) <= 240
                                            and star_snr >= 5.0
                                            and meas.get('fwhm') is not None),
@@ -1027,6 +1028,7 @@ HTML = r"""<!DOCTYPE html>
           <div class="seeing-detail">FWHM median: <span id="seeing-fwhm-med">--</span>"</div>
           <div class="seeing-detail">Method: <span id="seeing-method">--</span></div>
           <div class="seeing-detail">Frames: <span id="seeing-frames">--</span> (valid: <span id="seeing-valid">--</span>)</div>
+          <div class="seeing-detail" id="seeing-exp-warn" style="color:#da4;display:none"></div>
           <div class="trend-label">
             <span>Seeing History</span><span id="seeing-range">--</span>
           </div>
@@ -1969,6 +1971,14 @@ HTML = r"""<!DOCTYPE html>
       qEl.textContent = d.quality || '--';
       var qClass = d.quality === 'OK' ? 'ok' : (d.quality === 'HIGH_SCATTER' ? 'warn' : 'bad');
       qEl.className = 'seeing-quality ' + qClass;
+      // Exposure warning
+      var expWarnEl = document.getElementById('seeing-exp-warn');
+      if (d.exposure_warning) {
+        expWarnEl.textContent = d.exposure_warning;
+        expWarnEl.style.display = 'block';
+      } else {
+        expWarnEl.style.display = 'none';
+      }
       // Update image HUD seeing
       var hudSW = document.getElementById('hud-seeing-wrap');
       if (d.seeing_arcsec !== null) {
